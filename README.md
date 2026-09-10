@@ -21,6 +21,7 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 | 6b | NaCl box (Curve25519 + XSalsa20-Poly1305) | ✅ libsodium'la bayt bayt aynı |
 | 6c | DISCO ping/pong/call-me-maybe mesajları | ✅ wire format testleri |
 | 7 | Yol keşfi motoru (ping/ölç/seç/canlı tut) | ✅ sahte NAT'larla test edildi |
+| 7b | Cihaz durum makinesi (bağlan/kaydol/geri çekil) | ✅ sahte saatle test edildi |
 | 8 | WireGuard veri düzlemi (esp_wireguard) | ⬜ kart gerektiriyor |
 | 9 | NAPT subnet routing — ev ağındaki cihazlara erişim | ⬜ |
 | 10 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ⬜ |
@@ -112,6 +113,7 @@ include/poly1305.h        src/poly1305.c         Poly1305 (AEAD ve NaCl ortak ku
 include/nacl_box.h        src/nacl_box.c         Salsa20/HSalsa20 + NaCl secretbox
 include/disco.h           src/disco.c            DISCO mesaj çerçeveleme
 include/ts_path.h         src/ts_path.c          yol keşfi ve seçimi
+include/ts_client.h       src/ts_client.c        cihaz durum makinesi
 include/ts_control.h      src/ts_control.c       upgrade + handshake + /machine/*
 
 host/sim_net.c                                   sahte UDP ağı + sahte NAT'lar
@@ -168,3 +170,11 @@ sınıfta olduğunu ancak kartta STUN çalıştırınca öğreneceğiz.
 
 Motorun simetrik senaryoda "yol buldum" dememesi bilerek test ediliyor:
 olmayan bir yolu varmış gibi göstermek, hiç bulamamaktan daha kötüdür.
+
+## Sunucuları yormama
+
+Bu, başkasının altyapısı. `build/client_test` bir saatlik tam kesinti
+simüle edip kaç kez bağlanmaya çalışıldığını sayıyor: **66.** Geri çekilme
+1 saniyeden başlayıp 60 saniyede tavan yapıyor, üstüne ±%25 jitter var —
+aynı anda elektrik gelen bir sürü cihaz aynı saniyede saldırmasın diye.
+429 gelirse beş dakika susuluyor, ısrar edilmiyor.
