@@ -20,10 +20,11 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 | 6a | STUN istemcisi | ✅ RFC 5769 vektörü |
 | 6b | NaCl box (Curve25519 + XSalsa20-Poly1305) | ✅ libsodium'la bayt bayt aynı |
 | 6c | DISCO ping/pong/call-me-maybe mesajları | ✅ wire format testleri |
-| 7 | WireGuard veri düzlemi + DISCO yol seçimi | ⬜ kart gerektiriyor |
-| 8 | NAPT subnet routing — ev ağındaki cihazlara erişim | ⬜ |
-| 9 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ⬜ |
-| 10 | DERP relay (TLS gerektirir, bellek baskısı) | ⬜ opsiyonel |
+| 7 | Yol keşfi motoru (ping/ölç/seç/canlı tut) | ✅ sahte NAT'larla test edildi |
+| 8 | WireGuard veri düzlemi (esp_wireguard) | ⬜ kart gerektiriyor |
+| 9 | NAPT subnet routing — ev ağındaki cihazlara erişim | ⬜ |
+| 10 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ⬜ |
+| 11 | DERP relay (TLS gerektirir, bellek baskısı) | ⬜ simetrik NAT'ta şart |
 
 Kontrol düzlemi çalışıyor. Uçtan uca doğrulanmış zincir:
 
@@ -110,8 +111,10 @@ include/stun.h            src/stun.c             STUN binding
 include/poly1305.h        src/poly1305.c         Poly1305 (AEAD ve NaCl ortak kullanır)
 include/nacl_box.h        src/nacl_box.c         Salsa20/HSalsa20 + NaCl secretbox
 include/disco.h           src/disco.c            DISCO mesaj çerçeveleme
+include/ts_path.h         src/ts_path.c          yol keşfi ve seçimi
 include/ts_control.h      src/ts_control.c       upgrade + handshake + /machine/*
 
+host/sim_net.c                                   sahte UDP ağı + sahte NAT'lar
 host/posix_io.c                                  TEK platforma özgü dosya
 host/*_test.c, host/h2_probe.c                   test ve teşhis
 tools/gen_hpack.py, tools/gen_hpack_vectors.py   RFC'den tablo/vektör üretimi
@@ -146,3 +149,22 @@ HTTP upgrade  POST /ts2021, Upgrade: tailscale-control-protocol,
 MIT — bkz. [LICENSE](LICENSE). Üçüncü taraf kod ve atıflar için [NOTICE.md](NOTICE.md).
 
 Tailscale Inc. ile ilişkili değildir, onun tarafından onaylanmamıştır.
+
+## NAT gerçeği
+
+`build/path_test` motoru gerçek ev modemlerinin davranışlarına karşı çalıştırır.
+Sonuç, projenin senin evinde çalışıp çalışmayacağını belirleyen şey:
+
+| Senin modemin | Karşı taraf | Doğrudan yol |
+|---|---|---|
+| açık / full cone / restricted cone | aynısı | ✅ kuruluyor |
+| restricted cone | restricted cone | ✅ delik açılıyor |
+| **simetrik** | herhangi | ❌ **kurulamıyor — DERP şart** |
+
+Son satır önemli: simetrik NAT'ta delik açılamaz, bu protokolün değil
+matematiğin sonucu. O durumda trafiğin Tailscale'in relay sunucularından
+geçmesi gerekir, o da TLS demek, o da ~45 KB RAM demek. Modeminin hangi
+sınıfta olduğunu ancak kartta STUN çalıştırınca öğreneceğiz.
+
+Motorun simetrik senaryoda "yol buldum" dememesi bilerek test ediliyor:
+olmayan bir yolu varmış gibi göstermek, hiç bulamamaktan daha kötüdür.

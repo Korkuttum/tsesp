@@ -6,11 +6,11 @@ CFLAGS ?= -O2 -Wall -Wextra -Iinclude -Ihost
 CORE := src/blake2s.c src/x25519.c src/poly1305.c src/chacha20poly1305.c src/ts2021.c \
         src/ts_io.c src/ts_noise_stream.c src/hpack.c src/hpack_tables.c \
         src/h2.c src/json_stream.c src/ts_netmap.c src/ts_control.c src/stun.c \
-        src/nacl_box.c src/disco.c
+        src/nacl_box.c src/disco.c src/ts_path.c
 
 # Offline known-answer tests. These are what `make test` runs.
 TESTS := build/selftest build/hpack_test build/json_test build/stun_test \
-         build/nacl_test build/disco_test
+         build/nacl_test build/disco_test build/path_test
 
 # Programs that talk to a real control server.
 LIVE  := build/ts2021_handshake build/register_test build/netmap_test build/h2_probe
@@ -43,6 +43,10 @@ build/nacl_test: host/nacl_test.c host/nacl_vectors.c $(CORE)
 build/disco_test: | build
 build/disco_test: host/disco_test.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ host/disco_test.c $(CORE)
+
+build/path_test: | build
+build/path_test: host/path_test.c host/sim_net.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/path_test.c host/sim_net.c $(CORE)
 
 build/ts2021_handshake: | build
 build/ts2021_handshake: host/handshake_test.c $(CORE)
