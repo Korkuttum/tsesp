@@ -39,6 +39,15 @@ int tsesp_crypto_selftest(void) {
     check("empty", out, "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9", 32);
     blake2s(out, 32, "abc", 3);
     check("abc", out, "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982", 32);
+    {
+        // RFC 7693 keyed vector: key 00..1f, empty message.
+        uint8_t key[32];
+        int i;
+        for (i = 0; i < 32; i++) key[i] = (uint8_t)i;
+        blake2s_keyed(out, 32, key, 32, "", 0);
+        check("keyed, empty", out,
+              "48a8997da407876b3d79c0d92325ad3b89cbb754d86ab71aee047ad345fd2c49", 32);
+    }
 
     printf("X25519 (RFC 7748 sec 6.1)\n");
     {

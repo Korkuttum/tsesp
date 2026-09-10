@@ -23,6 +23,9 @@ typedef struct {
     char     addr[TS_ADDR_STR];        // the peer's 100.x address
     uint8_t  disco_key[32];
     bool     has_disco;
+    uint8_t  node_key[32];      // WireGuard's static key for this peer
+    bool     has_node_key;
+    int      wg_index;          // into the WireGuard device, or -1
     uint16_t home_derp;
     bool     online;
     char     endpoints[TS_MAX_ENDPOINTS][TS_ADDR_STR];

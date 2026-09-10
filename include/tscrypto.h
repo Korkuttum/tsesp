@@ -19,9 +19,14 @@ typedef struct {
 } blake2s_ctx;
 
 void blake2s_init(blake2s_ctx *ctx, size_t outlen);
+// Keyed mode, as MAC. WireGuard's mac1 is a 16-byte keyed BLAKE2s.
+void blake2s_init_key(blake2s_ctx *ctx, size_t outlen,
+                      const void *key, size_t keylen);
 void blake2s_update(blake2s_ctx *ctx, const void *in, size_t inlen);
 void blake2s_final(blake2s_ctx *ctx, void *out);
 void blake2s(void *out, size_t outlen, const void *in, size_t inlen);
+void blake2s_keyed(void *out, size_t outlen, const void *key, size_t keylen,
+                   const void *in, size_t inlen);
 
 // HMAC-BLAKE2s and HKDF-BLAKE2s (what Noise's MixKey needs).
 void hmac_blake2s(uint8_t out[BLAKE2S_OUT],

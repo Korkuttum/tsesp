@@ -46,6 +46,7 @@ peer_entry *peers_upsert(const ts_peer *p) {
         e->in_use = true;
         e->id = p->id;
         e->path_index = -1;
+        e->wg_index = -1;
     }
 
     // Only overwrite what the update actually carried. An incremental record
@@ -54,6 +55,7 @@ peer_entry *peers_upsert(const ts_peer *p) {
     if (p->name[0])       snprintf(e->name, sizeof(e->name), "%s", p->name);
     if (p->naddrs)        snprintf(e->addr, sizeof(e->addr), "%s", p->addrs[0]);
     if (p->has_disco_key) { memcpy(e->disco_key, p->disco_key, 32); e->has_disco = true; }
+    if (p->has_node_key)  { memcpy(e->node_key, p->node_key, 32); e->has_node_key = true; }
     if (p->home_derp)     e->home_derp = p->home_derp;
     if (p->has_online)    e->online = p->online != 0;
     if (p->nendpoints) {

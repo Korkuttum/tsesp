@@ -9,11 +9,12 @@ CORE := src/blake2s.c src/x25519.c src/poly1305.c src/chacha20poly1305.c src/ts2
         src/ts_io.c src/ts_noise_stream.c src/hpack.c src/hpack_tables.c \
         src/h2.c src/json_stream.c src/ts_netmap.c src/ts_control.c src/stun.c \
         src/nacl_box.c src/disco.c src/ts_path.c src/ts_client.c \
-        src/tsesp_selftest.c src/derp.c
+        src/tsesp_selftest.c src/derp.c src/wireguard.c
 
 # Offline known-answer tests. These are what `make test` runs.
 TESTS := build/selftest build/hpack_test build/json_test build/stun_test \
-         build/nacl_test build/disco_test build/path_test build/client_test
+         build/nacl_test build/disco_test build/path_test build/client_test \
+         build/wireguard_test
 
 # Programs that talk to a real control server.
 LIVE  := build/ts2021_handshake build/register_test build/netmap_test build/h2_probe
@@ -54,6 +55,10 @@ build/path_test: host/path_test.c host/sim_net.c $(CORE)
 build/client_test: | build
 build/client_test: host/client_test.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ host/client_test.c $(CORE)
+
+build/wireguard_test: | build
+build/wireguard_test: host/wireguard_test.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/wireguard_test.c $(CORE)
 
 build/ts2021_handshake: | build
 build/ts2021_handshake: host/handshake_test.c $(CORE)

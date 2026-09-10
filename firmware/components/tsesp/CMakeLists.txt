@@ -24,6 +24,7 @@ idf_component_register(
         "${TSESP_ROOT}/src/ts_path.c"
         "${TSESP_ROOT}/src/ts_client.c"
         "${TSESP_ROOT}/src/derp.c"
+        "${TSESP_ROOT}/src/wireguard.c"
         "${TSESP_ROOT}/src/tsesp_selftest.c"
     INCLUDE_DIRS
         "${TSESP_ROOT}/include"

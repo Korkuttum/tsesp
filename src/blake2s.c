@@ -20,6 +20,8 @@ static const uint8_t blake2s_sigma[10][16] = {
     {10, 2, 8, 4, 7, 6, 1, 5,15,11, 9,14, 3,12,13, 0}
 };
 
+void blake2s_update(blake2s_ctx *ctx, const void *in, size_t inlen);
+
 static uint32_t load32(const void *src) {
     const uint8_t *p = (const uint8_t *)src;
     return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) |
@@ -82,6 +84,32 @@ void blake2s_init(blake2s_ctx *ctx, size_t outlen) {
     for (i = 0; i < 8; i++) ctx->h[i] = blake2s_iv[i];
     // Parameter block: digest_length | key_length(0) | fanout(1) | depth(1)
     ctx->h[0] ^= 0x01010000UL ^ (uint32_t)outlen;
+}
+
+// Keyed mode: the key length goes into the parameter block and the padded
+// key becomes the first block of input.
+void blake2s_init_key(blake2s_ctx *ctx, size_t outlen,
+                      const void *key, size_t keylen) {
+    uint8_t block[BLAKE2S_BLOCK];
+    int i;
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->outlen = outlen;
+    for (i = 0; i < 8; i++) ctx->h[i] = blake2s_iv[i];
+    ctx->h[0] ^= 0x01010000UL ^ ((uint32_t)keylen << 8) ^ (uint32_t)outlen;
+
+    memset(block, 0, sizeof(block));
+    if (keylen) memcpy(block, key, keylen);
+    blake2s_update(ctx, block, BLAKE2S_BLOCK);
+    memset(block, 0, sizeof(block));
+}
+
+void blake2s_keyed(void *out, size_t outlen, const void *key, size_t keylen,
+                   const void *in, size_t inlen) {
+    blake2s_ctx ctx;
+    blake2s_init_key(&ctx, outlen, key, keylen);
+    blake2s_update(&ctx, in, inlen);
+    blake2s_final(&ctx, out);
 }
 
 void blake2s_update(blake2s_ctx *ctx, const void *in, size_t inlen) {

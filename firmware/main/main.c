@@ -13,7 +13,9 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include <time.h>
 #include "nvs_flash.h"
+#include "esp_sntp.h"
 
 #include "tscrypto.h"
 #include "ts2021.h"
@@ -378,6 +380,22 @@ void app_main(void) {
 
     portal_start(false);
 
+    // WireGuard timestamps need a real clock, and so does certificate
+    // validation. Both fail quietly with a 1970 date.
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    {
+        int tries;
+        time_t t = 0;
+        for (tries = 0; tries < 20; tries++) {
+            time(&t);
+            if (t > 1700000000) break;
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        ESP_LOGI(TAG, "clock: %s", t > 1700000000 ? "set from ntp" : "NOT SET");
+    }
+
     // Scoring a peer's endpoints needs to know which network we are on: an
     // address on this same LAN is worth more than any public one.
     {
@@ -417,7 +435,7 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "identity ready, %s",
              device_is_registered() ? "already registered" : "not yet registered");
-    if (magic_start(s_disco_priv, s_node_pub) != 0)
+    if (magic_start(s_disco_priv, s_node_pub, s_node_priv) != 0)
         ESP_LOGE(TAG, "could not open the udp socket; no direct paths possible");
     derp_task_start(s_node_priv, s_node_pub);
 

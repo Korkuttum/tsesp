@@ -14,6 +14,8 @@
 #include "magic.h"
 #include "stun.h"
 #include "disco.h"
+#include "wireguard.h"
+#include <time.h>
 
 static const char *TAG = "magic";
 
@@ -35,6 +37,7 @@ static char          s_public[48];
 // "no pongs" cannot be told apart from "nothing arrives at all".
 static uint32_t      s_rx_packets;
 static int           s_stun_tries;
+static wg_device    *s_wg;
 
 #define LOCK()   xSemaphoreTake(s_lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_lock)
@@ -68,6 +71,14 @@ static uint32_t env_now(void *ctx) {
 static void env_random(void *ctx, uint8_t *out, size_t n) {
     (void)ctx;
     esp_fill_random(out, n);
+}
+
+// WireGuard needs a real clock: a peer refuses a handshake timestamp older
+// than the last it saw from us, so a device that comes back with 1970 on its
+// clock can never re-handshake.
+static uint64_t wg_unix_time(void *ctx) {
+    (void)ctx;
+    return (uint64_t)time(NULL);
 }
 
 static void on_path_change(void *ctx, const ts_path_peer *peer, const ts_path *best) {
@@ -112,6 +123,11 @@ void magic_sync_peers(void) {
         pi = ts_path_add_peer(s_eng, e->id, e->disco_key, NULL, e->home_derp);
         if (pi < 0) continue;
         e->path_index = pi;
+
+        if (e->has_node_key && e->wg_index < 0) {
+            e->wg_index = wg_add_peer(s_wg, e->node_key);
+            if (e->wg_index < 0) ESP_LOGW(TAG, "no room in the WireGuard table");
+        }
 
         for (j = 0; j < e->nendpoints; j++) {
             uint8_t ip[16];
@@ -236,9 +252,79 @@ static void loopback_probe(void) {
         ESP_LOGI(TAG, "loopback probe sent to self:%d", MAGIC_PORT);
 }
 
+// Everything that is not DISCO or STUN on this socket belongs to WireGuard.
+static void handle_wireguard(const uint8_t *pkt, size_t len,
+                             const struct sockaddr_in *from) {
+    static uint8_t plain[1600], reply[256];
+    size_t plain_len = 0, reply_len = 0;
+    int idx;
+
+    idx = wg_handle(s_wg, pkt, len, plain, sizeof(plain), &plain_len,
+                    reply, sizeof(reply), &reply_len);
+    if (idx < 0) {
+        // A shared socket sees odd traffic; only sizes that could really be
+        // WireGuard are worth a line in the log.
+        if ((pkt[0] == WG_MSG_INITIATION && len == WG_INITIATION_SIZE) ||
+            (pkt[0] == WG_MSG_RESPONSE && len == WG_RESPONSE_SIZE) ||
+            (pkt[0] == WG_MSG_TRANSPORT && len >= WG_TRANSPORT_HEADER + WG_TAG_LEN))
+            ESP_LOGW(TAG, "wireguard type %u len %u rejected (%d)",
+                     pkt[0], (unsigned)len, idx);
+        return;
+    }
+    if (reply_len) {
+        sendto(s_sock, reply, reply_len, 0, (const struct sockaddr *)from,
+               sizeof(*from));
+        ESP_LOGI(TAG, "answered a handshake from peer %d", idx);
+    }
+    if (pkt[0] == WG_MSG_RESPONSE)
+        ESP_LOGI(TAG, "*** WireGuard session established with peer %d ***", idx);
+    if (pkt[0] == WG_MSG_TRANSPORT && plain_len)
+        ESP_LOGI(TAG, "tunnel packet: %u bytes from peer %d", (unsigned)plain_len, idx);
+}
+
+// Starts a handshake with any peer that has a working path but no session.
+static void wg_maintain(void) {
+    int i, n = peers_count();
+
+    for (i = 0; i < n; i++) {
+        peer_entry *e = peers_at(i);
+        const ts_path *best;
+        static uint8_t init[WG_INITIATION_SIZE];
+        uint8_t v4[4];
+        struct sockaddr_in dst;
+
+        if (!e || e->wg_index < 0 || e->path_index < 0) continue;
+        if (!wg_needs_handshake(s_wg, e->wg_index)) continue;
+
+        best = ts_path_best(s_eng, e->path_index);
+        if (!best || !disco_is_ipv4_mapped(best->ip, v4)) continue;
+
+        if (wg_create_initiation(s_wg, e->wg_index, init) != 0) continue;
+        memset(&dst, 0, sizeof(dst));
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(best->port);
+        memcpy(&dst.sin_addr, v4, 4);
+        sendto(s_sock, init, sizeof(init), 0, (struct sockaddr *)&dst, sizeof(dst));
+        ESP_LOGI(TAG, "handshake -> %s (%u.%u.%u.%u:%u)",
+                 e->name, v4[0], v4[1], v4[2], v4[3], best->port);
+    }
+}
+
+int magic_tunnels_up(void) {
+    int i, n = peers_count(), up = 0;
+    if (!s_wg) return 0;
+    for (i = 0; i < n; i++) {
+        peer_entry *e = peers_at(i);
+        if (e && e->wg_index >= 0 && wg_is_established(s_wg, e->wg_index)) up++;
+    }
+    return up;
+}
+
 static void magic_task(void *arg) {
-    uint8_t buf[1600];
-    uint32_t last_report = 0;
+    // Static, not on the stack: X25519 alone wants about 1.5 KB of stack and
+    // a 1600-byte receive buffer beside it overflows the task.
+    static uint8_t buf[1600];
+    uint32_t last_report = 0, last_wg = 0;
     bool probed = false;
     (void)arg;
 
@@ -267,10 +353,13 @@ static void magic_task(void *arg) {
                 stun_format_addr(s_public, sizeof(s_public), addr, is6, port);
                 ESP_LOGI(TAG, "this device looks like %s from outside", s_public);
             } else {
-                // Everything else is DISCO, or WireGuard once that exists.
                 disco_ipv4_mapped(src, (const uint8_t *)&from.sin_addr);
                 LOCK();
-                ts_path_on_datagram(s_eng, src, ntohs(from.sin_port), buf, (size_t)n);
+                if (ts_path_on_datagram(s_eng, src, ntohs(from.sin_port),
+                                        buf, (size_t)n) == 0) {
+                    // Not DISCO: WireGuard's, then.
+                    handle_wireguard(buf, (size_t)n, &from);
+                }
                 UNLOCK();
             }
         }
@@ -293,14 +382,15 @@ static void magic_task(void *arg) {
         // keepalives and expiry all happen here.
         LOCK();
         ts_path_tick(s_eng);
+        if (now - last_wg > 1000) { last_wg = now; wg_maintain(); }
         UNLOCK();
 
         // Without this the probing is completely silent and a run that finds
         // nothing looks the same as a run that never tried.
         if (now - last_report > 15000) {
             last_report = now;
-            ESP_LOGI(TAG, "paths %d/%d up | tx ping %u | rx packets %u (pong %u, unknown %u)",
-                     magic_paths_up(), peers_count(),
+            ESP_LOGI(TAG, "paths %d/%d up, tunnels %d | tx ping %u | rx packets %u (pong %u, unknown %u)",
+                     magic_paths_up(), peers_count(), magic_tunnels_up(),
                      (unsigned)s_eng->pings_sent, (unsigned)s_rx_packets,
                      (unsigned)s_eng->pongs_received,
                      (unsigned)s_eng->unknown_senders);
@@ -308,7 +398,8 @@ static void magic_task(void *arg) {
     }
 }
 
-int magic_start(const uint8_t disco_priv[32], const uint8_t node_pub[32]) {
+int magic_start(const uint8_t disco_priv[32], const uint8_t node_pub[32],
+                const uint8_t node_priv_for_wg[32]) {
     struct sockaddr_in addr = {0};
     ts_path_env env;
     struct timeval tv = { 0, 250000 };     // wake often enough to tick
@@ -334,6 +425,13 @@ int magic_start(const uint8_t disco_priv[32], const uint8_t node_pub[32]) {
     }
     setsockopt(s_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    s_wg = calloc(1, sizeof(*s_wg));
+    if (!s_wg) { close(s_sock); s_sock = -1; free(s_eng); s_eng = NULL; return -1; }
+    wg_device_init(s_wg, node_priv_for_wg);
+    s_wg->now_ms = env_now;
+    s_wg->random = env_random;
+    s_wg->unix_time = wg_unix_time;
+
     memset(&env, 0, sizeof(env));
     env.send_udp = env_send;
     env.now_ms = env_now;
@@ -341,7 +439,8 @@ int magic_start(const uint8_t disco_priv[32], const uint8_t node_pub[32]) {
     env.on_path_change = on_path_change;
     ts_path_init(s_eng, &env, disco_priv, node_pub);
 
-    xTaskCreate(magic_task, "magic", 4096, NULL, 5, NULL);
+    // The handshake path runs X25519 on this stack.
+    xTaskCreate(magic_task, "magic", 8192, NULL, 5, NULL);
     ESP_LOGI(TAG, "udp socket up on port %d", MAGIC_PORT);
     return 0;
 }
