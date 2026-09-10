@@ -18,8 +18,9 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 | 4 | `/machine/register` → gerçek login URL'i | ✅ HTTP 200, URL alındı |
 | 5 | `/machine/map` → peer listesi + 100.x IP | ✅ gerçek tailnet'ten çekildi |
 | 6a | STUN istemcisi | ✅ RFC 5769 vektörü |
-| 6b | WireGuard veri düzlemi (esp_wireguard, dinamik peer) | ⬜ |
-| 7 | DISCO ping/pong/call-me-maybe → NAT delme | ⬜ |
+| 6b | NaCl box (Curve25519 + XSalsa20-Poly1305) | ✅ libsodium'la bayt bayt aynı |
+| 6c | DISCO ping/pong/call-me-maybe mesajları | ✅ wire format testleri |
+| 7 | WireGuard veri düzlemi + DISCO yol seçimi | ⬜ kart gerektiriyor |
 | 8 | NAPT subnet routing — ev ağındaki cihazlara erişim | ⬜ |
 | 9 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ⬜ |
 | 10 | DERP relay (TLS gerektirir, bellek baskısı) | ⬜ opsiyonel |
@@ -106,12 +107,22 @@ include/h2.h              src/h2.c               minimal HTTP/2 istemcisi
 include/json_stream.h     src/json_stream.c      push-mode JSON parser
 include/ts_netmap.h       src/ts_netmap.c        netmap çerçeveleme + peer çıkarma
 include/stun.h            src/stun.c             STUN binding
+include/poly1305.h        src/poly1305.c         Poly1305 (AEAD ve NaCl ortak kullanır)
+include/nacl_box.h        src/nacl_box.c         Salsa20/HSalsa20 + NaCl secretbox
+include/disco.h           src/disco.c            DISCO mesaj çerçeveleme
 include/ts_control.h      src/ts_control.c       upgrade + handshake + /machine/*
 
 host/posix_io.c                                  TEK platforma özgü dosya
 host/*_test.c, host/h2_probe.c                   test ve teşhis
 tools/gen_hpack.py, tools/gen_hpack_vectors.py   RFC'den tablo/vektör üretimi
+tools/gen_nacl_vectors.py                        libsodium'dan NaCl vektörleri
 ```
+
+NaCl vektörleri de elle yazılmadı — `make nacl-vectors` onları libsodium'dan
+(PyNaCl üzerinden) üretir. Mesaj uzunlukları 32 baytın iki yanına düşecek
+şekilde seçilmiştir, çünkü NaCl anahtar akışının ilk 32 baytını Poly1305
+anahtarına ayırır ve elle yazılmış bir uygulamanın yanılması en olası yer
+orasıdır.
 
 Elle yazılmış tek bir tablo yok: HPACK'in statik tablosu, Huffman kodu ve test
 vektörleri RFC 7541'in metninden üretiliyor, ve üretici Huffman kodunun kanonik
