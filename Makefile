@@ -9,7 +9,7 @@ CORE := src/blake2s.c src/x25519.c src/poly1305.c src/chacha20poly1305.c src/ts2
         src/ts_io.c src/ts_noise_stream.c src/hpack.c src/hpack_tables.c \
         src/h2.c src/json_stream.c src/ts_netmap.c src/ts_control.c src/stun.c \
         src/nacl_box.c src/disco.c src/ts_path.c src/ts_client.c \
-        src/tsesp_selftest.c
+        src/tsesp_selftest.c src/derp.c
 
 # Offline known-answer tests. These are what `make test` runs.
 TESTS := build/selftest build/hpack_test build/json_test build/stun_test \
@@ -91,3 +91,11 @@ clean:
 	rm -rf build
 
 .PHONY: all test tables nacl-vectors clean
+
+# Live DERP test needs TLS on the host; the device uses mbedTLS instead.
+OPENSSL_PREFIX ?= /opt/homebrew/opt/openssl@3
+build/derp_test: | build
+build/derp_test: host/derp_test.c host/openssl_io.c host/posix_io.c $(CORE)
+	$(CC) $(CFLAGS) -I$(OPENSSL_PREFIX)/include -o $@ host/derp_test.c \
+	  host/openssl_io.c host/posix_io.c $(CORE) \
+	  -L$(OPENSSL_PREFIX)/lib -lssl -lcrypto
