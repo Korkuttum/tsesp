@@ -86,6 +86,16 @@ typedef struct {
 int ts_control_map(ts_control *tc, const ts_map_req *req,
                    ts_netmap_parser *parser, int *out_status);
 
+// Pushes our endpoints, disco key and Hostinfo without asking for peers.
+//
+// This is the shape tailcfg documents for the purpose: OmitPeers true,
+// Stream false, ReadOnly false, which lets a client update itself without
+// disturbing a long-poll session it already has open. Putting the same
+// fields in the streaming request is apparently not how the server expects
+// to receive them.
+int ts_control_update_endpoints(ts_control *tc, const ts_map_req *req,
+                                int *out_status);
+
 // Set to log the request bodies we send. Off by default.
 extern void (*ts_control_debug_body)(const char *body, size_t len);
 

@@ -305,13 +305,12 @@ static int map_on_data(void *ctx, const uint8_t *data, size_t len) {
     return 0;
 }
 
-int ts_control_map(ts_control *tc, const ts_map_req *req,
-                   ts_netmap_parser *parser, int *out_status) {
-    char body[832], nodekey[65], discokey[65], hostname[96];
+static int build_map_body(const ts_map_req *req, char *body, size_t cap,
+                          int stream, int omit_peers) {
+    char nodekey[65], discokey[65], hostname[96];
     char endpoints[TS_MAX_SELF_ENDPOINTS * 56 + 24];
     char netinfo[160];
-    map_ctx mctx;
-    int n, rc, status = 0, i;
+    int n, i;
 
     hex32(nodekey, req->node_pub);
     hex32(discokey, req->disco_pub);
@@ -343,7 +342,7 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
 
     // Compress is deliberately absent: zstd would mean carrying a decompressor
     // and, worse, buffering whole messages before they could be parsed.
-    n = snprintf(body, sizeof(body),
+    n = snprintf(body, cap,
                  "{\"Version\":%d"
                  ",\"NodeKey\":\"nodekey:%s\""
                  ",\"DiscoKey\":\"discokey:%s\""
@@ -354,11 +353,22 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
                  "%s%s%s}",
                  req->capver > 0 ? req->capver : TS2021_PROTOCOL_VERSION,
                  nodekey, discokey, hostname, netinfo,
-                 req->stream ? ",\"Stream\":true" : "",
-                 req->omit_peers ? ",\"OmitPeers\":true" : "",
+                 stream ? ",\"Stream\":true" : "",
+                 omit_peers ? ",\"OmitPeers\":true" : "",
                  endpoints);
-    if (n < 0 || (size_t)n >= sizeof(body)) return -1;
+    if (n < 0 || (size_t)n >= cap) return -1;
     if (ts_control_debug_body) ts_control_debug_body(body, (size_t)n);
+    return n;
+}
+
+int ts_control_map(ts_control *tc, const ts_map_req *req,
+                   ts_netmap_parser *parser, int *out_status) {
+    char body[832];
+    map_ctx mctx;
+    int n, rc, status = 0;
+
+    n = build_map_body(req, body, sizeof(body), req->stream, req->omit_peers);
+    if (n < 0) return -1;
 
     memset(&mctx, 0, sizeof(mctx));
     mctx.parser = parser;
@@ -373,4 +383,28 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
     if (status != 200) return -10;
     if (mctx.failed) return -11;
     return 0;
+}
+
+int ts_control_update_endpoints(ts_control *tc, const ts_map_req *req,
+                                int *out_status) {
+    char body[832];
+    map_ctx mctx;
+    int n, rc, status = 0;
+    ts_netmap_parser throwaway;
+
+    // OmitPeers with Stream off: the documented way to tell control where we
+    // are without asking it to describe the tailnet back to us.
+    n = build_map_body(req, body, sizeof(body), 0, 1);
+    if (n < 0) return -1;
+
+    ts_netmap_parser_init(&throwaway, NULL, NULL);
+    memset(&mctx, 0, sizeof(mctx));
+    mctx.parser = &throwaway;
+
+    rc = h2_request(&tc->h2, "POST", "https", tc->host, "/machine/map",
+                    "application/json", (const uint8_t *)body, (size_t)n,
+                    NULL, map_on_data, &mctx, &status);
+    if (out_status) *out_status = status;
+    if (rc != 0) return rc;
+    return status == 200 ? 0 : -10;
 }

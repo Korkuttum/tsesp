@@ -54,6 +54,7 @@ static ts_client       s_client;
 static char s_tailnet_addr[48];
 static char s_login_url[TS_AUTH_URL_MAX];
 static bool s_stun_done;
+static volatile bool s_push_wanted;
 static char s_local_ep[32];      // 192.168.x.y:41641
 static char s_public_ep[52];     // what STUN told us, if anything
 
@@ -107,8 +108,12 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
 
     // The map request carries our home relay, and it was not known when this
     // session opened. Ending the session makes the next one report it.
+    // Once the relay is up we know our home region, which is part of what
+    // control needs. Ending this session is the simplest way to get back to
+    // a point where a second connection can be opened safely.
     if (derp_task_take_changed() && derp_task_region()) {
-        ESP_LOGI(TAG, "relay established; restarting the map session to report it");
+        ESP_LOGI(TAG, "relay up; will report our endpoints");
+        s_push_wanted = true;
         return 1;
     }
     if (info->self_naddrs)
@@ -211,6 +216,44 @@ static void collect_endpoints(ts_map_req *req) {
         req->endpoints[req->nendpoints++] = s_public_ep;
 }
 
+// Tells control where we are, on its own short-lived connection. The
+// streaming session stays open; this is the request shape tailcfg documents
+// for exactly that.
+static void push_endpoints(void) {
+    ts_map_req req;
+    ts_control *tc;
+    esp_io io;
+    uint8_t eph[32];
+    int status = 0, rc;
+
+    tc = calloc(1, sizeof(*tc));
+    if (!tc) return;
+    io.fd = -1;
+
+    if (esp_io_connect(&io, CONTROL_HOST, CONTROL_PORT, 20) != 0) { free(tc); return; }
+    esp_fill_random(eph, sizeof(eph));
+    if (ts_control_connect(tc, &io.io, CONTROL_HOST, s_machine, s_control_pub, eph) != 0) {
+        esp_io_close(&io);
+        free(tc);
+        return;
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.node_pub = s_node_pub;
+    req.disco_pub = s_disco_pub;
+    req.hostname = "tsesp";
+    req.preferred_derp = derp_task_region();
+    req.working_udp = 1;
+    collect_endpoints(&req);
+
+    rc = ts_control_update_endpoints(tc, &req, &status);
+    ESP_LOGI(TAG, "endpoint update: rc=%d http=%d, sent %d endpoint(s), derp %u",
+             rc, status, req.nendpoints, derp_task_region());
+
+    esp_io_close(&io);
+    free(tc);
+}
+
 static ts_result do_map(void) {
     ts_map_req req = {0};
     int rc, status = 0;
@@ -256,6 +299,7 @@ static void control_task(void *arg) {
         switch (act.kind) {
         case TS_ACT_WAIT:
             publish_status(ts_client_state_name(s_client.state));
+            if (s_push_wanted) { s_push_wanted = false; push_endpoints(); }
             vTaskDelay(pdMS_TO_TICKS(act.wait_ms ? act.wait_ms : 200));
             continue;
 
