@@ -1,43 +1,67 @@
-CFLAGS ?= -O2 -Wall -Wextra -Iinclude
-SRC := src/blake2s.c src/x25519.c src/chacha20poly1305.c src/ts2021.c
+# Host build. The protocol sources under src/ are the same translation units
+# that go into the ESP-IDF component; only host/posix_io.c is platform code.
 
-all: build/selftest build/ts2021_handshake
-
-build:
-	@mkdir -p build
-
-build/selftest: build $(SRC) host/selftest.c
-	$(CC) $(CFLAGS) -o $@ host/selftest.c $(SRC)
-
-build/ts2021_handshake: build $(SRC) host/handshake_test.c
-	$(CC) $(CFLAGS) -o $@ host/handshake_test.c $(SRC)
-
-test: build/selftest
-	./build/selftest
-
-clean:
-	rm -rf build
-
-.PHONY: all test clean
-
-build/hpack_test: build src/hpack.c src/hpack_tables.c host/hpack_test.c host/hpack_vectors.c
-	$(CC) $(CFLAGS) -Ihost -o $@ host/hpack_test.c host/hpack_vectors.c src/hpack.c src/hpack_tables.c
-
-build/json_test: build src/json_stream.c host/json_test.c
-	$(CC) $(CFLAGS) -o $@ host/json_test.c src/json_stream.c
+CFLAGS ?= -O2 -Wall -Wextra -Iinclude -Ihost
 
 CORE := src/blake2s.c src/x25519.c src/chacha20poly1305.c src/ts2021.c \
         src/ts_io.c src/ts_noise_stream.c src/hpack.c src/hpack_tables.c \
         src/h2.c src/json_stream.c src/ts_netmap.c src/ts_control.c src/stun.c
 
-build/register_test: build $(CORE) host/register_test.c host/posix_io.c
-	$(CC) $(CFLAGS) -Ihost -o $@ host/register_test.c host/posix_io.c $(CORE)
+# Offline known-answer tests. These are what `make test` runs.
+TESTS := build/selftest build/hpack_test build/json_test build/stun_test
 
-build/h2_probe: build $(CORE) host/h2_probe.c host/posix_io.c
-	$(CC) $(CFLAGS) -Ihost -o $@ host/h2_probe.c host/posix_io.c $(CORE)
+# Programs that talk to a real control server.
+LIVE  := build/ts2021_handshake build/register_test build/netmap_test build/h2_probe
 
-build/stun_test: build src/stun.c host/stun_test.c host/posix_io.c
-	$(CC) $(CFLAGS) -Ihost -o $@ host/stun_test.c host/posix_io.c src/stun.c src/ts_io.c
+all: $(TESTS) $(LIVE)
 
-build/netmap_test: build $(CORE) host/netmap_test.c host/posix_io.c
-	$(CC) $(CFLAGS) -Ihost -o $@ host/netmap_test.c host/posix_io.c $(CORE)
+build:
+	@mkdir -p build
+
+build/selftest: | build
+build/selftest: host/selftest.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/selftest.c $(CORE)
+
+build/hpack_test: | build
+build/hpack_test: host/hpack_test.c host/hpack_vectors.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/hpack_test.c host/hpack_vectors.c $(CORE)
+
+build/json_test: | build
+build/json_test: host/json_test.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/json_test.c $(CORE)
+
+build/stun_test: | build
+build/stun_test: host/stun_test.c host/posix_io.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/stun_test.c host/posix_io.c $(CORE)
+
+build/ts2021_handshake: | build
+build/ts2021_handshake: host/handshake_test.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/handshake_test.c $(CORE)
+
+build/register_test: | build
+build/register_test: host/register_test.c host/posix_io.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/register_test.c host/posix_io.c $(CORE)
+
+build/netmap_test: | build
+build/netmap_test: host/netmap_test.c host/posix_io.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/netmap_test.c host/posix_io.c $(CORE)
+
+build/h2_probe: | build
+build/h2_probe: host/h2_probe.c host/posix_io.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/h2_probe.c host/posix_io.c $(CORE)
+
+# Runs every offline test and fails the build if any of them fails.
+test: $(TESTS)
+	@rc=0; for t in $(TESTS); do \
+	  printf '\n=== %s ===\n' "$$t"; ./$$t || rc=1; \
+	done; exit $$rc
+
+# Regenerates the HPACK tables and test vectors from RFC 7541 (needs network).
+tables:
+	python3 tools/gen_hpack.py
+	python3 tools/gen_hpack_vectors.py
+
+clean:
+	rm -rf build
+
+.PHONY: all test tables clean
