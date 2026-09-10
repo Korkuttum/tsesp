@@ -9,10 +9,8 @@
 
 static int fails = 0;
 
-static void fail(const char *fmt, const char *a) {
-    printf("  FAIL ");
-    printf(fmt, a);
-    printf("\n");
+static void fail(const char *what) {
+    printf("  FAIL %s\n", what);
     fails++;
 }
 
@@ -55,7 +53,7 @@ int main(void) {
     printf("ping layout\n");
     // type(1) version(1) txid(12) nodekey(32) padding(n)
     if (disco_build_ping(inner, sizeof(inner), &ilen, txid, b_pub, 7) != 0) {
-        fail("%s", "build_ping");
+        fail("build_ping");
     } else {
         expect(ilen == 2 + 12 + 32 + 7, "length is 2 + 12 + 32 + padding");
         expect(inner[0] == DISCO_PING && inner[1] == 0, "type 0x01, version 0");
@@ -76,7 +74,7 @@ int main(void) {
         expect(src[10] == 0xff && src[11] == 0xff && src[12] == 203 && src[15] == 9,
                "IPv4 becomes ::ffff:203.0.113.9");
         if (disco_build_pong(inner, sizeof(inner), &ilen, txid, src, 41641) != 0) {
-            fail("%s", "build_pong");
+            fail("build_pong");
         } else {
             expect(ilen == 2 + 12 + 16 + 2, "length is 2 + 12 + 16 + 2");
             expect(inner[0] == DISCO_PONG, "type 0x02");
@@ -97,10 +95,10 @@ int main(void) {
 
         if (disco_build_call_me_maybe(inner, sizeof(inner), &ilen,
                                       (const uint8_t (*)[16])eps, ports, 3) != 0) {
-            fail("%s", "build_call_me_maybe");
+            fail("build_call_me_maybe");
         } else if (disco_seal(pkt, sizeof(pkt), &plen, a_pub, shared_ab,
                               nonce, inner, ilen) != 0) {
-            fail("%s", "seal");
+            fail("seal");
         } else {
             expect(plen == DISCO_HEADER_LEN + ilen + NACL_TAG_LEN,
                    "packet is header + inner + 16-byte tag");
@@ -110,7 +108,7 @@ int main(void) {
                    "sender disco key readable without decrypting");
 
             if (disco_open(pkt, plen, shared_ba, &m) != 0) {
-                fail("%s", "open with the peer's shared key");
+                fail("open with the peer's shared key");
             } else {
                 uint8_t v4[4];
                 expect(m.type == DISCO_CALL_ME_MAYBE, "type survives");
@@ -128,7 +126,7 @@ int main(void) {
         disco_build_ping(inner, sizeof(inner), &ilen, txid, b_pub, 20);
         disco_seal(pkt, sizeof(pkt), &plen, a_pub, shared_ab, nonce, inner, ilen);
         if (disco_open(pkt, plen, shared_ba, &m) != 0) {
-            fail("%s", "open ping");
+            fail("open ping");
         } else {
             expect(m.type == DISCO_PING && memcmp(m.txid, txid, 12) == 0, "txid survives");
             expect(m.has_node_key && memcmp(m.node_key, b_pub, 32) == 0, "node key survives");

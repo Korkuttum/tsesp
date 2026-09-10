@@ -11,3 +11,8 @@ sdkconfig
 sdkconfig.old
 managed_components/
 dependencies.lock
+
+# ESP-IDF build output and generated config
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old

@@ -1,0 +1,17 @@
+# ESP32-WROOM-32U: 4 MB flash, no PSRAM.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Nothing here uses Bluetooth, and leaving it out returns a large amount of
+# both flash and RAM on a chip that has little of either.
+CONFIG_BT_ENABLED=n
+
+# The control channel is Noise over plain HTTP, so mbedTLS is not on the
+# critical path. It stays in the build for now because DERP would need it.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The chip will do 240 MHz; the default is 160. Curve25519 is the slowest
+# thing we run and it scales straight with the clock.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240

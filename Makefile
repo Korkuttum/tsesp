@@ -1,12 +1,15 @@
 # Host build. The protocol sources under src/ are the same translation units
 # that go into the ESP-IDF component; only host/posix_io.c is platform code.
 
-CFLAGS ?= -O2 -Wall -Wextra -Iinclude -Ihost
+# -Wformat-truncation and friends match what the ESP-IDF build enforces;
+# without them a snprintf that silently truncates only fails at cross-compile.
+CFLAGS ?= -O2 -Wall -Wextra -Wformat=2 -Wshadow -Wvla -Iinclude -Ihost
 
 CORE := src/blake2s.c src/x25519.c src/poly1305.c src/chacha20poly1305.c src/ts2021.c \
         src/ts_io.c src/ts_noise_stream.c src/hpack.c src/hpack_tables.c \
         src/h2.c src/json_stream.c src/ts_netmap.c src/ts_control.c src/stun.c \
-        src/nacl_box.c src/disco.c src/ts_path.c src/ts_client.c
+        src/nacl_box.c src/disco.c src/ts_path.c src/ts_client.c \
+        src/tsesp_selftest.c
 
 # Offline known-answer tests. These are what `make test` runs.
 TESTS := build/selftest build/hpack_test build/json_test build/stun_test \

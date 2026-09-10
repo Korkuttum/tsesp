@@ -11,6 +11,9 @@ static int fails = 0;
 #define TRACE_CAP 16384
 typedef struct { char buf[TRACE_CAP]; size_t len; } trace;
 
+static void trace_add(trace *t, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
 static void trace_add(trace *t, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

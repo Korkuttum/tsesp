@@ -209,7 +209,9 @@ int ts_control_register(ts_control *tc, const ts_register_req *req,
     char nodekey[65];
     char hostname[96];
     char auth[192];
-    char followup[TS_AUTH_URL_MAX + 8];
+    // Room for the JSON wrapper as well as the URL itself; sizing this to
+    // the URL alone truncates a long AuthURL and the poll then never matches.
+    char followup[TS_AUTH_URL_MAX + 32];
     json_stream js;
     reg_ctx rctx;
     json_stream_cbs cbs;
@@ -221,7 +223,7 @@ int ts_control_register(ts_control *tc, const ts_register_req *req,
 
     auth[0] = '\0';
     if (req->auth_key && req->auth_key[0]) {
-        char esc[160];
+        char esc[128];
         json_escape(esc, sizeof(esc), req->auth_key);
         snprintf(auth, sizeof(auth), ",\"Auth\":{\"AuthKey\":\"%s\"}", esc);
     }
