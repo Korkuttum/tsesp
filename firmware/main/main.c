@@ -25,6 +25,7 @@
 #include "device_nvs.h"
 #include "peers.h"
 #include "magic.h"
+#include "derp_task.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
@@ -103,8 +104,21 @@ static void on_peer_removed(void *ctx, uint64_t id) {
 
 static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
     (void)ctx;
+
+    // The map request carries our home relay, and it was not known when this
+    // session opened. Ending the session makes the next one report it.
+    if (derp_task_take_changed() && derp_task_region()) {
+        ESP_LOGI(TAG, "relay established; restarting the map session to report it");
+        return 1;
+    }
     if (info->self_naddrs)
         snprintf(s_tailnet_addr, sizeof(s_tailnet_addr), "%s", info->self_addrs[0]);
+    // The relay hostnames only exist inside the netmap, so this is the first
+    // moment the device knows where to connect.
+    if (info->nderp > 0 && info->derp[0].host[0])
+        derp_task_set_region(info->derp[0].region_id, info->derp[0].host,
+                             info->derp[0].code);
+
     // Hand the freshly merged table to path discovery, then let it probe.
     magic_sync_peers();
 
@@ -210,7 +224,10 @@ static ts_result do_map(void) {
     // make the control plane treat us as a reachable node and hand our disco
     // key to peers. Once DERP is implemented this becomes a measured value.
     req.capver = TSESP_MAP_CAPVER;
-    req.preferred_derp = 4;
+    // Report the relay we are actually on, not one we hope to reach. The
+    // control plane appears to use this to decide whether to introduce us to
+    // our peers at all.
+    req.preferred_derp = derp_task_region();
     req.working_udp = 1;
     collect_endpoints(&req);
     if (req.nendpoints)
@@ -358,6 +375,7 @@ void app_main(void) {
              device_is_registered() ? "already registered" : "not yet registered");
     if (magic_start(s_disco_priv, s_node_pub) != 0)
         ESP_LOGE(TAG, "could not open the udp socket; no direct paths possible");
+    derp_task_start(s_node_priv, s_node_pub);
 
     ESP_LOGI(TAG, "free heap before control plane: %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));

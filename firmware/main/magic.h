@@ -22,6 +22,11 @@ void magic_request_stun(void);
 bool magic_get_public(char *out, size_t cap);
 
 // How many peers currently have a working direct path.
+// Feeds a packet that arrived over the relay rather than the UDP socket.
+void magic_handle_relayed(const uint8_t src_node_pub[32],
+                          const uint8_t src_ip[16], uint16_t src_port,
+                          const uint8_t *pkt, size_t len);
+
 int  magic_paths_up(void);
 const ts_path *magic_best_for(const peer_entry *p);
 void magic_stats(uint32_t *pings, uint32_t *pongs);

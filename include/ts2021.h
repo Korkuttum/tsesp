@@ -33,9 +33,17 @@
 #define TS2021_TAILSCALE_CONTROL_KEY \
     "7d2792f9c98d753d2042471536801949104c247f95eac770f8fb321595e2173b"
 
-// Must match tailcfg.CurrentCapabilityVersion closely enough for the server
-// to accept us; it is mixed into the Noise prologue.
-#define TS2021_PROTOCOL_VERSION 146
+// Deliberately not the newest capability version.
+//
+// At capver 144 a client takes on the job of advertising its own disco key
+// in-band, inside the WireGuard tunnel, and the control plane stops handing
+// that key - and the node's endpoints - to peers. Claiming to be that new
+// while not doing it leaves the node listed in the tailnet and reachable by
+// nobody: peers drop its DISCO packets because they have never seen the key.
+//
+// 142 is the last version before that change. Raise it only together with an
+// implementation of the advertisement.
+#define TS2021_PROTOCOL_VERSION 142
 
 typedef struct {
     uint8_t  h[32];

@@ -105,7 +105,12 @@ static int evict_slot(ts_path_peer *p, uint8_t score) {
 static int add_candidate(ts_path_engine *e, ts_path_peer *p,
                          const uint8_t ip[16], uint16_t port,
                          uint8_t score, int discovered) {
+    static const uint8_t zero[16] = {0};
     int i, slot;
+
+    // Messages relayed through DERP arrive with no source address. They are
+    // still worth reading; they are not worth probing.
+    if (port == 0 || memcmp(ip, zero, 16) == 0) return -1;
 
     for (i = 0; i < p->npaths; i++) {
         if (path_matches(&p->paths[i], ip, port)) {

@@ -40,6 +40,17 @@ typedef struct {
     int      from_changed;              // arrived in PeersChanged, not Peers
 } ts_peer;
 
+#ifndef TS_MAX_DERP_REGIONS
+#define TS_MAX_DERP_REGIONS 4      // we only ever connect to one
+#endif
+#define TS_DERP_HOST_STR 48
+
+typedef struct {
+    uint16_t region_id;
+    char     host[TS_DERP_HOST_STR];   // first node in the region
+    char     code[8];                  // "fra", "ams", ...
+} ts_derp_region;
+
 typedef struct {
     uint64_t self_id;
     char self_name[TS_NAME_STR];
@@ -57,6 +68,12 @@ typedef struct {
     // described. We do not apply them yet, so a non-zero count here means
     // some endpoint data is staler than it could be.
     int  unapplied_patches;
+
+    // A handful of relays from the DERP map. The stale derpN.tailscale.com
+    // names do not resolve to anything useful any more; these are the real
+    // ones and they arrive with every full netmap.
+    ts_derp_region derp[TS_MAX_DERP_REGIONS];
+    int            nderp;
 } ts_netmap_info;
 
 typedef void (*ts_peer_cb)(void *ctx, const ts_peer *peer);

@@ -199,6 +199,38 @@ static void on_value(void *ctx, const char *path, const char *v, size_t len,
                     TS_ADDR_STR, v, len);
         return;
     }
+    // "DERPMap.Regions.<id>.Nodes[].HostName" - the region id is a map key,
+    // so it appears in the path itself.
+    if (strncmp(path, "DERPMap.Regions.", 16) == 0 && type == JSON_STRING) {
+        const char *rest = path + 16;
+        const char *dot = strchr(rest, '.');
+        if (dot) {
+            char idbuf[8];
+            size_t idlen = (size_t)(dot - rest);
+            int i, region;
+            if (idlen && idlen < sizeof(idbuf)) {
+                memcpy(idbuf, rest, idlen);
+                idbuf[idlen] = '\0';
+                region = atoi(idbuf);
+                for (i = 0; i < p->info.nderp; i++)
+                    if (p->info.derp[i].region_id == region) break;
+                if (i == p->info.nderp && p->info.nderp < TS_MAX_DERP_REGIONS) {
+                    memset(&p->info.derp[i], 0, sizeof(p->info.derp[i]));
+                    p->info.derp[i].region_id = (uint16_t)region;
+                    p->info.nderp++;
+                }
+                if (i < p->info.nderp) {
+                    if (strcmp(dot, ".RegionCode") == 0)
+                        set_str(p->info.derp[i].code, sizeof(p->info.derp[i].code), v, len);
+                    // Keep the first node only; the others are alternates.
+                    else if (strcmp(dot, ".Nodes[].HostName") == 0 &&
+                             !p->info.derp[i].host[0])
+                        set_str(p->info.derp[i].host, TS_DERP_HOST_STR, v, len);
+                }
+            }
+        }
+        return;
+    }
     if (strcmp(path, "Domain") == 0 && type == JSON_STRING) {
         set_str(p->info.domain, TS_NAME_STR, v, len);
         return;
@@ -273,6 +305,7 @@ static void start_message(ts_netmap_parser *p) {
     p->info.self_nendpoints = 0;
     p->info.self_naddrs = 0;
     p->info.self_has_disco = 0;
+    p->info.nderp = 0;
     cbs.on_value = on_value;
     cbs.on_enter = on_enter;
     cbs.on_leave = on_leave;

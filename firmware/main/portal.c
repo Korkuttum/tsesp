@@ -377,6 +377,10 @@ static esp_err_t get_settings(httpd_req_t *req) {
         "<div class=cell><div class=k>UDP portu</div><div class=v>%d</div></div>"
         "<div class=cell><div class=k>Kayit</div><div class=v>%s</div></div>"
         "</div>"
+        "<h2>Tailnet</h2>"
+        "<p class=sub>Kimligi silip yeniden kaydolur. Wi-Fi ayarlari kalir.</p>"
+        "<form method=POST action=/rejoin>"
+        "<button type=submit>Tailnet'e yeniden kaydol</button></form>"
         "<h2>Tehlikeli</h2>"
         "<p class=sub>Wi-Fi bilgilerini ve tailnet kimligini siler. Cihaz kurulum "
         "moduna doner ve tailnet'e yeniden onaylanmasi gerekir.</p>"
@@ -389,6 +393,22 @@ static esp_err_t get_settings(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, page, o);
     free(page);
+    return ESP_OK;
+}
+
+// Rejoining the tailnet without redoing Wi-Fi. Useful whenever the node's
+// registration needs replacing - a changed capability version, an expired
+// key - and much less drastic than forgetting everything.
+static esp_err_t post_rejoin(httpd_req_t *req) {
+    device_keys_erase();
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_sendstr(req,
+        "<!doctype html><meta charset=utf-8>"
+        "<body style='font:16px system-ui;background:#0d1117;color:#e6edf3;padding:24px'>"
+        "Tailnet kimligi silindi. Cihaz yeniden baslayip yeni bir giris "
+        "baglantisi uretecek. Wi-Fi ayarlari duruyor.");
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
     return ESP_OK;
 }
 
@@ -472,11 +492,13 @@ esp_err_t portal_start(bool captive) {
         httpd_uri_t save = { .uri = "/save", .method = HTTP_POST, .handler = post_save };
         httpd_uri_t forget = { .uri = "/forget", .method = HTTP_POST, .handler = post_forget };
         httpd_uri_t settings = { .uri = "/settings", .method = HTTP_GET, .handler = get_settings };
+        httpd_uri_t rejoin = { .uri = "/rejoin", .method = HTTP_POST, .handler = post_rejoin };
         httpd_register_uri_handler(s_server, &root);
         httpd_register_uri_handler(s_server, &setup);
         httpd_register_uri_handler(s_server, &save);
         httpd_register_uri_handler(s_server, &forget);
         if (!captive) httpd_register_uri_handler(s_server, &settings);
+        if (!captive) httpd_register_uri_handler(s_server, &rejoin);
     }
 
     if (captive) {

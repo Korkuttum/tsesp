@@ -1,0 +1,8 @@
+# Name,     Type, SubType,  Offset,   Size
+# The default table gives the app 1 MB, which TLS and its certificate bundle
+# push past. There is 4 MB on this module, so the app gets 2 MB and the rest
+# is left free for whatever comes later.
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+factory,    app,  factory,  0x10000,  0x200000
+storage,    data, spiffs,   0x210000, 0x1F0000

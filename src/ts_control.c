@@ -347,8 +347,10 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
                  "{\"Version\":%d"
                  ",\"NodeKey\":\"nodekey:%s\""
                  ",\"DiscoKey\":\"discokey:%s\""
-                 ",\"Hostinfo\":{\"OS\":\"esp32\",\"Hostname\":\"%s\""
-                 ",\"IPNVersion\":\"0.1.0\",\"DeviceModel\":\"ESP32-WROOM-32U\"%s}"
+                 // Deliberately minimal: control appears to ignore this whole
+                 // object, and a smaller one narrows down whether a field is
+                 // to blame.
+                 ",\"Hostinfo\":{\"OS\":\"esp32\",\"Hostname\":\"%s\"%s}"
                  "%s%s%s}",
                  req->capver > 0 ? req->capver : TS2021_PROTOCOL_VERSION,
                  nodekey, discokey, hostname, netinfo,

@@ -131,6 +131,19 @@ void magic_sync_peers(void) {
     UNLOCK();
 }
 
+void magic_handle_relayed(const uint8_t src_node_pub[32],
+                          const uint8_t src_ip[16], uint16_t src_port,
+                          const uint8_t *pkt, size_t len) {
+    (void)src_node_pub;
+    if (!s_eng) return;
+    LOCK();
+    // The engine refuses to treat an all-zero address as a candidate, so a
+    // relayed DISCO message is understood without pretending the relay is a
+    // path we could probe.
+    ts_path_on_datagram(s_eng, src_ip, src_port, pkt, len);
+    UNLOCK();
+}
+
 int magic_paths_up(void) {
     int i, n = peers_count(), up = 0;
     if (!s_eng) return 0;
