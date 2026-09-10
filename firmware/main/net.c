@@ -57,7 +57,9 @@ static void start_ap(void) {
     wifi_config_t cfg = {0};
 
     ESP_LOGI(TAG, "starting setup access point %s", s_ap_ssid);
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    // APSTA, not AP: scanning for the user's network needs a station
+    // interface, and in pure AP mode the scan returns nothing at all.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     strncpy((char *)cfg.ap.ssid, s_ap_ssid, sizeof(cfg.ap.ssid));
     cfg.ap.ssid_len = strlen(s_ap_ssid);
     cfg.ap.channel = 1;

@@ -124,6 +124,16 @@ int main(int argc, char **argv) {
     req.node_pub = node_pub;
     req.disco_pub = disco_pub;
     req.hostname = "tsesp";
+    // Advertise an endpoint so we can see whether the server takes it and
+    // hands it back in our own Node record.
+    {
+        const char *ep = getenv("TSESP_EP");
+        if (ep && ep[0]) {
+            req.endpoints[0] = ep;
+            req.nendpoints = 1;
+            printf("advertising : %s\n", ep);
+        }
+    }
     req.stream = getenv("TSESP_STREAM") != NULL;
     if (req.stream) {
         const char *n = getenv("TSESP_STREAM");

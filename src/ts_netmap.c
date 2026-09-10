@@ -27,12 +27,38 @@ static void set_str(char *dst, size_t cap, const char *v, size_t len);
 
 // A peer can advertise a dozen endpoints and we only have room for a few, so
 // the ones we keep have to be the ones most likely to yield a direct path.
-// Public IPv4 wins: it is what NAT hole punching actually uses. A private
-// IPv4 is next, because a peer on the same LAN is the best case of all. IPv6
-// is last only because home ISPs here still break it more often than not.
+//
+// A peer sitting on our own network wins outright: no NAT is involved, the
+// latency is a millisecond, and it always works. It also rescues the case
+// where a peer shares our public address, since routers commonly refuse to
+// hairpin a packet back in through their own external side.
+//
+// Public IPv4 comes next, because that is what hole punching uses. Private
+// addresses on some other network are nearly always stale. IPv6 is last,
+// because we cannot even send to it on this build.
+#define EP_SCORE_OUR_LAN    4
 #define EP_SCORE_PUBLIC_V4  3
 #define EP_SCORE_PRIVATE_V4 2
 #define EP_SCORE_V6         1
+
+static uint8_t s_local_v4[4];
+static uint8_t s_local_prefix;      // 0 means "not known"
+
+void ts_netmap_set_local_v4(const uint8_t v4[4], uint8_t prefix_len) {
+    memcpy(s_local_v4, v4, 4);
+    s_local_prefix = prefix_len;
+}
+
+static int on_our_network(unsigned a, unsigned b, unsigned c, unsigned d) {
+    uint32_t ours, theirs, mask;
+    if (!s_local_prefix || s_local_prefix > 32) return 0;
+    ours = ((uint32_t)s_local_v4[0] << 24) | ((uint32_t)s_local_v4[1] << 16) |
+           ((uint32_t)s_local_v4[2] << 8) | s_local_v4[3];
+    theirs = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
+    mask = s_local_prefix == 32 ? 0xffffffffu
+                                : ~((1u << (32 - s_local_prefix)) - 1);
+    return (ours & mask) == (theirs & mask);
+}
 
 static int endpoint_score(const char *v, size_t len) {
     unsigned a, b, c, d, port;
@@ -43,12 +69,13 @@ static int endpoint_score(const char *v, size_t len) {
     tmp[len] = '\0';
     if (tmp[0] == '[') return EP_SCORE_V6;
     if (sscanf(tmp, "%u.%u.%u.%u:%u", &a, &b, &c, &d, &port) != 5) return EP_SCORE_V6;
+    if (a == 127) return 0;                                            // useless
+    if (on_our_network(a, b, c, d)) return EP_SCORE_OUR_LAN;
     if (a == 10) return EP_SCORE_PRIVATE_V4;
     if (a == 192 && b == 168) return EP_SCORE_PRIVATE_V4;
     if (a == 172 && b >= 16 && b <= 31) return EP_SCORE_PRIVATE_V4;
     if (a == 169 && b == 254) return EP_SCORE_PRIVATE_V4;
     if (a == 100 && b >= 64 && b <= 127) return EP_SCORE_PRIVATE_V4;   // CGNAT
-    if (a == 127) return 0;                                            // useless
     return EP_SCORE_PUBLIC_V4;
 }
 
@@ -160,6 +187,18 @@ static void on_value(void *ctx, const char *path, const char *v, size_t len,
         set_str(p->info.self_name, TS_NAME_STR, v, len);
         return;
     }
+    // Whether the control plane took the disco key we sent decides whether
+    // any peer will even look at our DISCO packets.
+    if (strcmp(path, "Node.DiscoKey") == 0 && type == JSON_STRING) {
+        p->info.self_has_disco = 1;
+        return;
+    }
+    if (strcmp(path, "Node.Endpoints[]") == 0 && type == JSON_STRING) {
+        if (p->info.self_nendpoints < TS_MAX_ENDPOINTS)
+            set_str(p->info.self_endpoints[p->info.self_nendpoints++],
+                    TS_ADDR_STR, v, len);
+        return;
+    }
     if (strcmp(path, "Domain") == 0 && type == JSON_STRING) {
         set_str(p->info.domain, TS_NAME_STR, v, len);
         return;
@@ -185,6 +224,20 @@ static void on_value(void *ctx, const char *path, const char *v, size_t len,
         char tmp[12];
         set_str(tmp, sizeof(tmp), v, len);
         pe->home_derp = (uint16_t)atoi(tmp);
+    } else if (strcmp(field, "DERP") == 0 && type == JSON_STRING) {
+        // The server still sends the region in the older form: a fake address
+        // "127.3.3.40:N" whose port is the DERP region number. Reading only
+        // HomeDERP leaves every peer looking like it has no relay at all.
+        const char *colon = memchr(v, ':', len);
+        if (colon && !pe->home_derp) {
+            char tmp[8];
+            size_t n = len - (size_t)(colon + 1 - v);
+            if (n < sizeof(tmp)) {
+                memcpy(tmp, colon + 1, n);
+                tmp[n] = '\0';
+                pe->home_derp = (uint16_t)atoi(tmp);
+            }
+        }
     } else if (strcmp(field, "Online") == 0) {
         pe->has_online = 1;
         pe->online = (type == JSON_TRUE);
@@ -216,6 +269,10 @@ void ts_netmap_parser_on_removed(ts_netmap_parser *p, ts_peer_removed_cb cb) {
 // Each message gets a fresh JSON parser; the framer decides where one ends.
 static void start_message(ts_netmap_parser *p) {
     json_stream_cbs cbs;
+    // Per-message, not cumulative: each netmap restates our own record.
+    p->info.self_nendpoints = 0;
+    p->info.self_naddrs = 0;
+    p->info.self_has_disco = 0;
     cbs.on_value = on_value;
     cbs.on_enter = on_enter;
     cbs.on_leave = on_leave;

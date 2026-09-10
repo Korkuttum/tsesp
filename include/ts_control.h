@@ -55,12 +55,29 @@ typedef struct {
 int ts_control_register(ts_control *tc, const ts_register_req *req,
                         ts_register_resp *resp);
 
+#define TS_MAX_SELF_ENDPOINTS 4
+
 typedef struct {
     const uint8_t *node_pub;    // 32 bytes
     const uint8_t *disco_pub;   // 32 bytes
     const char    *hostname;
+    // Capability version claimed in the request body. Modern control stops
+    // distributing endpoints to clients new enough to trade them over DERP
+    // instead, so a client without DERP may need to claim less.
+    int            capver;
     int            stream;      // long-poll for updates instead of one shot
     int            omit_peers;
+    // Where peers should try to reach us, as "1.2.3.4:41641". Without these
+    // the control plane has no address to hand out and nobody can start a
+    // conversation with this device.
+    const char    *endpoints[TS_MAX_SELF_ENDPOINTS];
+    int            nendpoints;
+    // A node's home DERP region, reported through Hostinfo.NetInfo. The
+    // control plane appears to withhold a node's disco key and endpoints
+    // from its peers until it has one, so without this nobody can reach us
+    // even on the same LAN.
+    int            preferred_derp;
+    int            working_udp;
 } ts_map_req;
 
 // POSTs /machine/map and streams the response through `parser`. With
@@ -68,5 +85,8 @@ typedef struct {
 // the request open and keeps sending updates, so this call will not return.
 int ts_control_map(ts_control *tc, const ts_map_req *req,
                    ts_netmap_parser *parser, int *out_status);
+
+// Set to log the request bodies we send. Off by default.
+extern void (*ts_control_debug_body)(const char *body, size_t len);
 
 #endif

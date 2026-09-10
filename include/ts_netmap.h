@@ -45,6 +45,11 @@ typedef struct {
     char self_name[TS_NAME_STR];
     char self_addrs[TS_MAX_ADDRS][TS_ADDR_STR];
     int  self_naddrs;
+    // What the control plane believes our endpoints are. Empty means peers
+    // have been given no way to reach us.
+    char self_endpoints[TS_MAX_ENDPOINTS][TS_ADDR_STR];
+    int  self_nendpoints;
+    int  self_has_disco;      // the server kept the disco key we sent
     char domain[TS_NAME_STR];
     int  peer_count;
     int  message_count;
@@ -90,6 +95,11 @@ typedef struct {
 } ts_netmap_parser;
 
 void ts_netmap_parser_init(ts_netmap_parser *p, ts_peer_cb cb, void *ctx);
+
+// Tells the parser which IPv4 network this device sits on, so a peer's
+// address on that same network can be ranked above everything else. Without
+// it the scoring cannot tell a useful LAN address from a stale one.
+void ts_netmap_set_local_v4(const uint8_t v4[4], uint8_t prefix_len);
 
 // Optional: called after each complete message.
 void ts_netmap_parser_on_message(ts_netmap_parser *p, ts_netmap_msg_cb cb);

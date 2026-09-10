@@ -23,11 +23,21 @@
 #include "esp_io.h"
 #include "net.h"
 #include "device_nvs.h"
+#include "peers.h"
+#include "magic.h"
+#include "esp_netif.h"
+#include "lwip/inet.h"
 
 static const char *TAG = "tsesp";
 
 #define CONTROL_HOST "controlplane.tailscale.com"
 #define CONTROL_PORT "80"
+// Experiment: what the request body claims, separate from the Noise
+// handshake version. Lower values ask control to behave like it would
+// for a client that cannot exchange endpoints over DERP.
+#ifndef TSESP_MAP_CAPVER
+#define TSESP_MAP_CAPVER 0    /* 0 = use the protocol version */
+#endif
 // A streaming map session sits idle between updates; the server sends a
 // keep-alive well inside this.
 #define SOCKET_TIMEOUT_S 120
@@ -42,7 +52,17 @@ static ts_client       s_client;
 
 static char s_tailnet_addr[48];
 static char s_login_url[TS_AUTH_URL_MAX];
-static int  s_peer_count;
+static bool s_stun_done;
+static char s_local_ep[32];      // 192.168.x.y:41641
+static char s_public_ep[52];     // what STUN told us, if anything
+
+static void log_request_body(const char *body, size_t len) {
+    // Split across lines: the log macro truncates long messages.
+    size_t i;
+    ESP_LOGI(TAG, "MapRequest (%u bytes):", (unsigned)len);
+    for (i = 0; i < len; i += 120)
+        ESP_LOGI(TAG, "  %.*s", (int)(len - i > 120 ? 120 : len - i), body + i);
+}
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -51,8 +71,8 @@ static void publish_status(const char *state) {
         .state = state,
         .tailnet_addr = s_tailnet_addr,
         .login_url = s_login_url,
-        .peers = s_peer_count,
-        .paths_up = 0,
+        .peers = peers_count(),
+        .paths_up = magic_paths_up(),
         .free_heap = (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
     };
     portal_set_status(&st);
@@ -61,24 +81,57 @@ static void publish_status(const char *state) {
 // ------------------------------------------------------------ control plane
 
 static void on_peer(void *ctx, const ts_peer *p) {
+    peer_entry *e;
     (void)ctx;
-    s_peer_count++;
-    ESP_LOGI(TAG, "peer %-34s %s  %s  endpoints=%d derp=%u",
-             p->name[0] ? p->name : "(unnamed)",
-             p->has_online ? (p->online ? "online " : "offline") : "       ",
-             p->naddrs ? p->addrs[0] : "-",
-             p->nendpoints, p->home_derp);
+
+    // Merge rather than replace: an incremental update carries the peer's
+    // identity and little else, and overwriting would drop its endpoints.
+    e = peers_upsert(p);
+    if (!e) return;
+    ESP_LOGI(TAG, "peer %-36s %s  %-19s endpoints=%d%s",
+             e->name[0] ? e->name : "(unnamed)",
+             e->online ? "online " : "offline",
+             e->addr[0] ? e->addr : "-",
+             e->nendpoints, p->from_changed ? "  (update)" : "");
+}
+
+static void on_peer_removed(void *ctx, uint64_t id) {
+    (void)ctx;
+    ESP_LOGI(TAG, "peer %llu left the tailnet", (unsigned long long)id);
+    peers_remove(id);
 }
 
 static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
     (void)ctx;
     if (info->self_naddrs)
         snprintf(s_tailnet_addr, sizeof(s_tailnet_addr), "%s", info->self_addrs[0]);
-    ESP_LOGI(TAG, "netmap #%d: %s, %d peers, heap %u",
+    // Hand the freshly merged table to path discovery, then let it probe.
+    magic_sync_peers();
+
+    // Only a message that restates our own record says anything about this;
+    // an incremental update carries peers only.
+    if (info->self_naddrs) {
+        int i;
+        for (i = 0; i < info->self_nendpoints; i++)
+            ESP_LOGI(TAG, "control plane lists us at %s", info->self_endpoints[i]);
+        if (!info->self_nendpoints)
+            ESP_LOGW(TAG, "control plane lists no endpoints for us; peers have "
+                          "no address to reach this device at");
+    }
+
+    ESP_LOGI(TAG, "netmap #%d: %s, %d peers known, heap %u",
              info->message_count,
              info->self_name[0] ? info->self_name : "(no name yet)",
-             info->peer_count,
+             peers_count(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
+    // One STUN lookup, from the same socket DISCO uses, so the address we
+    // learn is the mapping that socket actually has.
+    if (!s_stun_done) {
+        s_stun_done = true;
+        magic_request_stun();
+    }
+
     publish_status("running");
     return 0;      // keep the session open
 }
@@ -127,6 +180,23 @@ static ts_result do_register(const char *followup) {
     return TS_ERR_AUTH;
 }
 
+// Our own addresses, as peers should try them: the one on this LAN, and the
+// one the world sees. Without these the control plane hands peers nothing and
+// no one can start a conversation with this device.
+static void collect_endpoints(ts_map_req *req) {
+    esp_netif_ip_info_t ip;
+    esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    req->nendpoints = 0;
+    if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) {
+        snprintf(s_local_ep, sizeof(s_local_ep), IPSTR ":%d",
+                 IP2STR(&ip.ip), MAGIC_PORT);
+        req->endpoints[req->nendpoints++] = s_local_ep;
+    }
+    if (magic_get_public(s_public_ep, sizeof(s_public_ep)) && s_public_ep[0])
+        req->endpoints[req->nendpoints++] = s_public_ep;
+}
+
 static ts_result do_map(void) {
     ts_map_req req = {0};
     int rc, status = 0;
@@ -135,10 +205,23 @@ static ts_result do_map(void) {
     req.disco_pub = s_disco_pub;
     req.hostname = "tsesp";
     req.stream = 1;
+    // Region 4 is what every other node in this tailnet uses. We cannot
+    // actually relay through it yet, so this is provisional: it exists to
+    // make the control plane treat us as a reachable node and hand our disco
+    // key to peers. Once DERP is implemented this becomes a measured value.
+    req.capver = TSESP_MAP_CAPVER;
+    req.preferred_derp = 4;
+    req.working_udp = 1;
+    collect_endpoints(&req);
+    if (req.nendpoints)
+        ESP_LOGI(TAG, "advertising %d endpoint(s): %s%s%s", req.nendpoints,
+                 req.endpoints[0],
+                 req.nendpoints > 1 ? ", " : "",
+                 req.nendpoints > 1 ? req.endpoints[1] : "");
 
-    s_peer_count = 0;
     ts_netmap_parser_init(&s_netmap, on_peer, NULL);
     ts_netmap_parser_on_message(&s_netmap, on_netmap_message);
+    ts_netmap_parser_on_removed(&s_netmap, on_peer_removed);
 
     rc = ts_control_map(s_tc, &req, &s_netmap, &status);
     ESP_LOGW(TAG, "map session ended rc=%d http=%d", rc, status);
@@ -234,6 +317,21 @@ void app_main(void) {
 
     portal_start(false);
 
+    // Scoring a peer's endpoints needs to know which network we are on: an
+    // address on this same LAN is worth more than any public one.
+    {
+        esp_netif_ip_info_t ip;
+        esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK) {
+            uint8_t v4[4];
+            uint32_t host_order = ntohl(ip.ip.addr);
+            v4[0] = (uint8_t)(host_order >> 24); v4[1] = (uint8_t)(host_order >> 16);
+            v4[2] = (uint8_t)(host_order >> 8);  v4[3] = (uint8_t)host_order;
+            ts_netmap_set_local_v4(v4, 24);
+            ESP_LOGI(TAG, "local network %u.%u.%u.0/24", v4[0], v4[1], v4[2]);
+        }
+    }
+
     ESP_ERROR_CHECK(device_keys_load(s_machine, s_node_priv, s_disco_priv));
     x25519_base(s_node_pub, s_node_priv);
     x25519_base(s_disco_pub, s_disco_priv);
@@ -248,6 +346,7 @@ void app_main(void) {
         return;
     }
     s_io.fd = -1;
+    if (0) ts_control_debug_body = log_request_body;  /* flip to trace requests */
 
     // Seed the retry jitter from our own node key so two devices on the same
     // network do not retry in lockstep.
@@ -257,6 +356,9 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "identity ready, %s",
              device_is_registered() ? "already registered" : "not yet registered");
+    if (magic_start(s_disco_priv, s_node_pub) != 0)
+        ESP_LOGE(TAG, "could not open the udp socket; no direct paths possible");
+
     ESP_LOGI(TAG, "free heap before control plane: %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
 

@@ -4,6 +4,9 @@
 #include "tscrypto.h"
 #include "json_stream.h"
 
+// Optional hook so a caller can see exactly what went on the wire.
+void (*ts_control_debug_body)(const char *body, size_t len);
+
 static void copy_field(char *dst, size_t cap, const char *v, size_t len) {
     if (len >= cap) len = cap - 1;
     memcpy(dst, v, len);
@@ -304,13 +307,39 @@ static int map_on_data(void *ctx, const uint8_t *data, size_t len) {
 
 int ts_control_map(ts_control *tc, const ts_map_req *req,
                    ts_netmap_parser *parser, int *out_status) {
-    char body[512], nodekey[65], discokey[65], hostname[96];
+    char body[832], nodekey[65], discokey[65], hostname[96];
+    char endpoints[TS_MAX_SELF_ENDPOINTS * 56 + 24];
+    char netinfo[160];
     map_ctx mctx;
-    int n, rc, status = 0;
+    int n, rc, status = 0, i;
 
     hex32(nodekey, req->node_pub);
     hex32(discokey, req->disco_pub);
     json_escape(hostname, sizeof(hostname), req->hostname ? req->hostname : "tsesp");
+
+    netinfo[0] = '\0';
+    if (req->preferred_derp > 0) {
+        snprintf(netinfo, sizeof(netinfo),
+                 ",\"NetInfo\":{\"PreferredDERP\":%d,\"WorkingUDP\":%s"
+                 ",\"WorkingIPv6\":false,\"HairPinning\":false"
+                 ",\"DERPLatency\":{\"%d-v4\":0.05}}",
+                 req->preferred_derp, req->working_udp ? "true" : "false",
+                 req->preferred_derp);
+    }
+
+    endpoints[0] = '\0';
+    if (req->nendpoints > 0) {
+        size_t o = 0;
+        o += (size_t)snprintf(endpoints + o, sizeof(endpoints) - o, ",\"Endpoints\":[");
+        for (i = 0; i < req->nendpoints && i < TS_MAX_SELF_ENDPOINTS; i++) {
+            char esc[52];
+            if (!req->endpoints[i] || !req->endpoints[i][0]) continue;
+            json_escape(esc, sizeof(esc), req->endpoints[i]);
+            o += (size_t)snprintf(endpoints + o, sizeof(endpoints) - o,
+                                  "%s\"%s\"", i ? "," : "", esc);
+        }
+        snprintf(endpoints + o, sizeof(endpoints) - o, "]");
+    }
 
     // Compress is deliberately absent: zstd would mean carrying a decompressor
     // and, worse, buffering whole messages before they could be parsed.
@@ -319,12 +348,15 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
                  ",\"NodeKey\":\"nodekey:%s\""
                  ",\"DiscoKey\":\"discokey:%s\""
                  ",\"Hostinfo\":{\"OS\":\"esp32\",\"Hostname\":\"%s\""
-                 ",\"IPNVersion\":\"0.1.0\",\"DeviceModel\":\"ESP32-WROOM-32U\"}"
-                 "%s%s}",
-                 TS2021_PROTOCOL_VERSION, nodekey, discokey, hostname,
+                 ",\"IPNVersion\":\"0.1.0\",\"DeviceModel\":\"ESP32-WROOM-32U\"%s}"
+                 "%s%s%s}",
+                 req->capver > 0 ? req->capver : TS2021_PROTOCOL_VERSION,
+                 nodekey, discokey, hostname, netinfo,
                  req->stream ? ",\"Stream\":true" : "",
-                 req->omit_peers ? ",\"OmitPeers\":true" : "");
+                 req->omit_peers ? ",\"OmitPeers\":true" : "",
+                 endpoints);
     if (n < 0 || (size_t)n >= sizeof(body)) return -1;
+    if (ts_control_debug_body) ts_control_debug_body(body, (size_t)n);
 
     memset(&mctx, 0, sizeof(mctx));
     mctx.parser = parser;
