@@ -1,5 +1,7 @@
 # tsesp — ESP32-WROOM-32U için sıfırdan Tailscale istemcisi
 
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 PSRAM'siz klasik ESP32'ye (520 KB SRAM) sığacak şekilde yazılmış, taşınabilir C.
 Protokol kodu socket'e hiç dokunmaz; aynı `.c` dosyaları hem POSIX test
 harness'ında hem ESP-IDF firmware'inde derlenir.
@@ -127,3 +129,9 @@ nonce       4 sıfır bayt + big-endian uint64 sayaç, AAD yok
 HTTP upgrade  POST /ts2021, Upgrade: tailscale-control-protocol,
               X-Tailscale-Handshake: base64(initiation) → 101 Switching Protocols
 ```
+
+## Lisans
+
+MIT — bkz. [LICENSE](LICENSE). Üçüncü taraf kod ve atıflar için [NOTICE.md](NOTICE.md).
+
+Tailscale Inc. ile ilişkili değildir, onun tarafından onaylanmamıştır.
