@@ -6,6 +6,7 @@
 #include "posix_io.h"
 #include "ts_control.h"
 #include "tscrypto.h"
+#include <time.h>
 
 #define KEYFILE "tsesp-keys.bin"
 
@@ -32,6 +33,50 @@ static int load_keys(uint8_t m[32], uint8_t n[32], uint8_t d[32]) {
         printf("disco key   : generated and appended\n");
     }
     return 0;
+}
+
+// In streaming mode the server holds the connection open and keeps sending
+// messages: a full netmap first, then updates and keep-alives. This is what
+// the device will actually run, instead of reconnecting on a timer.
+static int stream_messages_wanted = 1;
+static time_t stream_started;
+
+static void dump_raw(int idx);
+static FILE *raw_file;
+
+static int on_message(void *ctx, const ts_netmap_info *info) {
+    (void)ctx;
+    if (getenv("TSESP_RAW")) { if (raw_file) fflush(raw_file); dump_raw(info->message_count); }
+    printf("  [%3lds] mesaj #%d  peers=%d\n",
+           (long)(time(NULL) - stream_started), info->message_count, info->peer_count);
+    return info->message_count >= stream_messages_wanted;   // non-zero stops
+}
+
+// Accumulates each streamed message so we can report its true size. The raw
+// callback fires per network chunk, not per message - reporting a chunk as a
+// message is exactly the kind of mistake that makes a debug tool lie.
+static char  raw_buf[4096];
+static size_t raw_len, raw_total;
+static int    raw_idx = -1;
+
+static void on_raw(void *ctx, int idx, const uint8_t *d, size_t len) {
+    (void)ctx;
+    if (idx != raw_idx) { raw_idx = idx; raw_len = 0; raw_total = 0; }
+    if (!raw_file) raw_file = fopen("/tmp/netmap_msg.json", "wb");
+    if (raw_file && idx == 1) fwrite(d, 1, len, raw_file);
+    raw_total += len;
+    if (raw_len < sizeof(raw_buf)) {
+        size_t take = sizeof(raw_buf) - raw_len;
+        if (take > len) take = len;
+        memcpy(raw_buf + raw_len, d, take);
+        raw_len += take;
+    }
+}
+
+static void dump_raw(int idx) {
+    size_t show = raw_len > 700 ? 700 : raw_len;
+    printf("  --- mesaj #%d: %zu bayt, ilk %zu ---\n  %.*s\n",
+           idx, raw_total, show, (int)show, raw_buf);
 }
 
 static void print_peer(void *ctx, const ts_peer *p) {
@@ -79,9 +124,17 @@ int main(int argc, char **argv) {
     req.node_pub = node_pub;
     req.disco_pub = disco_pub;
     req.hostname = "tsesp";
-    req.stream = 0;
-
-    printf("fetching netmap...\n\n");
+    req.stream = getenv("TSESP_STREAM") != NULL;
+    if (req.stream) {
+        const char *n = getenv("TSESP_STREAM");
+        stream_messages_wanted = atoi(n) > 0 ? atoi(n) : 3;
+        stream_started = time(NULL);
+        ts_netmap_parser_on_message(&parser, on_message);
+        if (getenv("TSESP_RAW")) ts_netmap_parser_on_raw(&parser, on_raw);
+        printf("streaming netmap (%d mesaj bekleniyor)...\n\n", stream_messages_wanted);
+    } else {
+        printf("fetching netmap...\n\n");
+    }
     rc = ts_control_map(&tc, &req, &parser, &status);
     printf("\nmap         : rc=%d http=%d messages=%d\n",
            rc, status, parser.info.message_count);

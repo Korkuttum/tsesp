@@ -79,28 +79,74 @@ static void set_str(char *dst, size_t cap, const char *v, size_t len) {
     dst[len] = '\0';
 }
 
+// A one-shot fetch answers with "Peers"; a streaming session answers with
+// "PeersChanged" instead, and sends "Peers" only rarely. Both carry complete
+// Node objects, so both are handled the same way here. Getting this wrong is
+// invisible in a one-shot test and produces an empty peer list in the mode
+// the device actually runs.
+static int is_peer_object(const char *path, int *from_changed) {
+    if (strcmp(path, "Peers[]") == 0)        { *from_changed = 0; return 1; }
+    if (strcmp(path, "PeersChanged[]") == 0) { *from_changed = 1; return 1; }
+    return 0;
+}
+
+// Returns the field name inside a peer object, or NULL if the path is not
+// inside one.
+static const char *peer_field(const char *path) {
+    if (strncmp(path, "Peers[].", 8) == 0) return path + 8;
+    if (strncmp(path, "PeersChanged[].", 15) == 0) return path + 15;
+    return NULL;
+}
+
 static void on_enter(void *ctx, const char *path, int is_array) {
     ts_netmap_parser *p = (ts_netmap_parser *)ctx;
-    if (!is_array && strcmp(path, "Peers[]") == 0) {
+    int from_changed;
+    if (!is_array && is_peer_object(path, &from_changed)) {
         memset(&p->peer, 0, sizeof(p->peer));
+        p->peer.from_changed = from_changed;
         p->in_peer = 1;
     }
 }
 
 static void on_leave(void *ctx, const char *path, int is_array) {
     ts_netmap_parser *p = (ts_netmap_parser *)ctx;
-    if (!is_array && strcmp(path, "Peers[]") == 0 && p->in_peer) {
+    int from_changed;
+    if (!is_array && is_peer_object(path, &from_changed) && p->in_peer) {
         p->in_peer = 0;
         p->info.peer_count++;
         if (p->peer_cb) p->peer_cb(p->cb_ctx, &p->peer);
     }
 }
 
+static uint64_t parse_u64(const char *v, size_t len) {
+    char tmp[24];
+    if (len >= sizeof(tmp)) return 0;
+    memcpy(tmp, v, len);
+    tmp[len] = '\0';
+    return strtoull(tmp, NULL, 10);
+}
+
 static void on_value(void *ctx, const char *path, const char *v, size_t len,
                      json_type type, int truncated) {
     ts_netmap_parser *p = (ts_netmap_parser *)ctx;
     ts_peer *pe = &p->peer;
+    const char *field;
     (void)truncated;
+
+    // Peers that went away, so the caller can tear their tunnels down.
+    if (strcmp(path, "PeersRemoved[]") == 0 && type == JSON_NUMBER) {
+        if (p->removed_cb) p->removed_cb(p->cb_ctx, parse_u64(v, len));
+        return;
+    }
+    if (strncmp(path, "PeersChangedPatch[]", 19) == 0) {
+        // Counted, not applied: see ts_netmap_info.unapplied_patches.
+        if (strcmp(path, "PeersChangedPatch[].NodeID") == 0) p->info.unapplied_patches++;
+        return;
+    }
+    if (strcmp(path, "Node.ID") == 0 && type == JSON_NUMBER) {
+        p->info.self_id = parse_u64(v, len);
+        return;
+    }
 
     // --- our own node ---
     if (strcmp(path, "Node.Addresses[]") == 0 && type == JSON_STRING) {
@@ -121,26 +167,30 @@ static void on_value(void *ctx, const char *path, const char *v, size_t len,
 
     // --- peers ---
     if (!p->in_peer) return;
+    field = peer_field(path);
+    if (!field) return;
 
-    if (strcmp(path, "Peers[].Key") == 0 && type == JSON_STRING)
+    if (strcmp(field, "ID") == 0 && type == JSON_NUMBER)
+        pe->id = parse_u64(v, len);
+    else if (strcmp(field, "Key") == 0 && type == JSON_STRING)
         pe->has_node_key = parse_prefixed_key(v, len, "nodekey:", pe->node_key) == 0;
-    else if (strcmp(path, "Peers[].DiscoKey") == 0 && type == JSON_STRING)
+    else if (strcmp(field, "DiscoKey") == 0 && type == JSON_STRING)
         pe->has_disco_key = parse_prefixed_key(v, len, "discokey:", pe->disco_key) == 0;
-    else if (strcmp(path, "Peers[].Addresses[]") == 0 && type == JSON_STRING) {
+    else if (strcmp(field, "Addresses[]") == 0 && type == JSON_STRING) {
         if (pe->naddrs < TS_MAX_ADDRS)
             set_str(pe->addrs[pe->naddrs++], TS_ADDR_STR, v, len);
-    } else if (strcmp(path, "Peers[].Endpoints[]") == 0 && type == JSON_STRING) {
+    } else if (strcmp(field, "Endpoints[]") == 0 && type == JSON_STRING) {
         peer_add_endpoint(pe, v, len);
-    } else if (strcmp(path, "Peers[].HomeDERP") == 0 && type == JSON_NUMBER) {
+    } else if (strcmp(field, "HomeDERP") == 0 && type == JSON_NUMBER) {
         char tmp[12];
         set_str(tmp, sizeof(tmp), v, len);
         pe->home_derp = (uint16_t)atoi(tmp);
-    } else if (strcmp(path, "Peers[].Online") == 0) {
+    } else if (strcmp(field, "Online") == 0) {
         pe->has_online = 1;
         pe->online = (type == JSON_TRUE);
     } else if (type == JSON_STRING &&
-               (strcmp(path, "Peers[].ComputedName") == 0 ||
-                (strcmp(path, "Peers[].Name") == 0 && pe->name[0] == '\0'))) {
+               (strcmp(field, "ComputedName") == 0 ||
+                (strcmp(field, "Name") == 0 && pe->name[0] == '\0'))) {
         set_str(pe->name, TS_NAME_STR, v, len);
     }
 }
@@ -149,6 +199,18 @@ void ts_netmap_parser_init(ts_netmap_parser *p, ts_peer_cb cb, void *ctx) {
     memset(p, 0, sizeof(*p));
     p->peer_cb = cb;
     p->cb_ctx = ctx;
+}
+
+void ts_netmap_parser_on_message(ts_netmap_parser *p, ts_netmap_msg_cb cb) {
+    p->msg_cb = cb;
+}
+
+void ts_netmap_parser_on_raw(ts_netmap_parser *p, ts_netmap_raw_cb cb) {
+    p->raw_cb = cb;
+}
+
+void ts_netmap_parser_on_removed(ts_netmap_parser *p, ts_peer_removed_cb cb) {
+    p->removed_cb = cb;
 }
 
 // Each message gets a fresh JSON parser; the framer decides where one ends.
@@ -166,6 +228,7 @@ int ts_netmap_feed(ts_netmap_parser *p, const uint8_t *data, size_t len) {
     size_t i = 0;
 
     if (p->error) return -1;
+    if (p->stop) return 1;
 
     while (i < len) {
         if (!p->in_message) {
@@ -182,6 +245,7 @@ int ts_netmap_feed(ts_netmap_parser *p, const uint8_t *data, size_t len) {
             start_message(p);
             if (p->msg_remaining == 0) {      // keep-alive style empty message
                 p->in_message = 0;
+                if (p->msg_cb && p->msg_cb(p->cb_ctx, &p->info)) { p->stop = 1; return 1; }
                 continue;
             }
         }
@@ -189,6 +253,7 @@ int ts_netmap_feed(ts_netmap_parser *p, const uint8_t *data, size_t len) {
         {
             size_t take = len - i;
             if (take > p->msg_remaining) take = p->msg_remaining;
+            if (p->raw_cb) p->raw_cb(p->cb_ctx, p->info.message_count, data + i, take);
             if (json_stream_feed(&p->js, data + i, take) != 0) {
                 p->error = -1;
                 return -1;
@@ -198,6 +263,7 @@ int ts_netmap_feed(ts_netmap_parser *p, const uint8_t *data, size_t len) {
             if (p->msg_remaining == 0) {
                 p->in_message = 0;
                 if (json_stream_finish(&p->js) != 0) { p->error = -1; return -1; }
+                if (p->msg_cb && p->msg_cb(p->cb_ctx, &p->info)) { p->stop = 1; return 1; }
             }
         }
     }

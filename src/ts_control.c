@@ -277,11 +277,13 @@ typedef struct {
     char   raw[192];
     size_t raw_len;
     int    failed;
+    int    stopped;      // a netmap callback asked to stop
 } map_ctx;
 
 static int map_on_data(void *ctx, const uint8_t *data, size_t len) {
     map_ctx *m = (map_ctx *)ctx;
     size_t room = sizeof(m->raw) - 1 - m->raw_len;
+    int rc;
 
     // Keep the head of the body only so a plain-text error is still readable.
     if (room > 0) {
@@ -290,7 +292,11 @@ static int map_on_data(void *ctx, const uint8_t *data, size_t len) {
         m->raw_len += take;
         m->raw[m->raw_len] = '\0';
     }
-    if (!m->failed && ts_netmap_feed(m->parser, data, len) != 0) m->failed = 1;
+    if (m->failed || m->stopped) return 0;
+
+    rc = ts_netmap_feed(m->parser, data, len);
+    if (rc < 0) { m->failed = 1; return 0; }
+    if (rc > 0) { m->stopped = 1; return 1; }   // stop the request
     return 0;
 }
 
@@ -325,6 +331,8 @@ int ts_control_map(ts_control *tc, const ts_map_req *req,
                     "application/json", (const uint8_t *)body, (size_t)n,
                     NULL, map_on_data, &mctx, &status);
     if (out_status) *out_status = status;
+    // Stopping on purpose is a normal end to a streaming fetch, not a failure.
+    if (mctx.stopped && rc == H2_ERR_ABORTED) rc = 0;
     if (rc != 0) return rc;
     if (status != 200) return -10;
     if (mctx.failed) return -11;
