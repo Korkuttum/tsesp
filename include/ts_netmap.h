@@ -41,7 +41,10 @@ typedef struct {
 } ts_peer;
 
 #ifndef TS_MAX_DERP_REGIONS
-#define TS_MAX_DERP_REGIONS 4      // we only ever connect to one
+// The whole map. Keeping a prefix of it does not work: the regions arrive in
+// no particular order, so the one our peers use may simply not be in the
+// first handful. At 58 bytes each this is under 2 KB.
+#define TS_MAX_DERP_REGIONS 32
 #endif
 #define TS_DERP_HOST_STR 48
 

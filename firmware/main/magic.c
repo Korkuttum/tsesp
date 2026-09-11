@@ -18,6 +18,7 @@
 #include "wireguard.h"
 #include <time.h>
 #include "tun.h"
+#include "derp_task.h"
 
 static const char *TAG = "magic";
 
@@ -40,6 +41,9 @@ static char          s_public[48];
 static uint32_t      s_rx_packets;
 static int           s_stun_tries;
 static wg_device    *s_wg;
+
+static void handle_wireguard(const uint8_t *pkt, size_t len,
+                             const struct sockaddr_in *from);
 
 // Packets lwIP wants to put into the tunnel.
 //
@@ -164,15 +168,19 @@ void magic_sync_peers(void) {
 }
 
 void magic_handle_relayed(const uint8_t src_node_pub[32],
-                          const uint8_t src_ip[16], uint16_t src_port,
                           const uint8_t *pkt, size_t len) {
+    uint8_t nowhere[16];
     (void)src_node_pub;
+
     if (!s_eng) return;
+    memset(nowhere, 0, sizeof(nowhere));
+
     LOCK();
-    // The engine refuses to treat an all-zero address as a candidate, so a
-    // relayed DISCO message is understood without pretending the relay is a
-    // path we could probe.
-    ts_path_on_datagram(s_eng, src_ip, src_port, pkt, len);
+    // The engine refuses an all-zero address as a candidate, so a relayed
+    // DISCO message is understood without pretending the relay is a path we
+    // could probe. Anything it does not recognise is WireGuard's.
+    if (ts_path_on_datagram(s_eng, nowhere, 0, pkt, len) == 0)
+        handle_wireguard(pkt, len, NULL);
     UNLOCK();
 }
 
@@ -268,6 +276,33 @@ static void loopback_probe(void) {
         ESP_LOGI(TAG, "loopback probe sent to self:%d", MAGIC_PORT);
 }
 
+// Sends to a peer by whatever route works. A direct path is always better -
+// one hop instead of a trip to Frankfurt - but behind carrier NAT there may
+// never be one, and the relay is then the only way the tunnel exists at all.
+// Set to 1 to ignore direct paths entirely, which is the only way to
+// exercise the relay from a network where hole punching works.
+#ifndef TSESP_FORCE_RELAY
+#define TSESP_FORCE_RELAY 0
+#endif
+
+static int send_to_peer(peer_entry *e, const uint8_t *pkt, size_t len) {
+    const ts_path *best = TSESP_FORCE_RELAY ? NULL :
+        (e->path_index >= 0 ? ts_path_best(s_eng, e->path_index) : NULL);
+    uint8_t v4[4];
+
+    if (best && disco_is_ipv4_mapped(best->ip, v4)) {
+        struct sockaddr_in dst;
+        memset(&dst, 0, sizeof(dst));
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(best->port);
+        memcpy(&dst.sin_addr, v4, 4);
+        if (sendto(s_sock, pkt, len, 0, (struct sockaddr *)&dst, sizeof(dst)) >= 0)
+            return 0;
+    }
+    if (e->has_node_key) return derp_task_send(e->node_key, pkt, len);
+    return -1;
+}
+
 // Everything that is not DISCO or STUN on this socket belongs to WireGuard.
 static void handle_wireguard(const uint8_t *pkt, size_t len,
                              const struct sockaddr_in *from) {
@@ -288,9 +323,20 @@ static void handle_wireguard(const uint8_t *pkt, size_t len,
         return;
     }
     if (reply_len) {
-        sendto(s_sock, reply, reply_len, 0, (const struct sockaddr *)from,
-               sizeof(*from));
-        ESP_LOGI(TAG, "answered a handshake from peer %d", idx);
+        if (from) {
+            sendto(s_sock, reply, reply_len, 0, (const struct sockaddr *)from,
+                   sizeof(*from));
+        } else {
+            // Arrived over the relay, so the answer goes back the same way.
+            int i, n = peers_count();
+            for (i = 0; i < n; i++) {
+                peer_entry *e = peers_at(i);
+                if (e && e->wg_index == idx && e->has_node_key)
+                    derp_task_send(e->node_key, reply, reply_len);
+            }
+        }
+        ESP_LOGI(TAG, "answered a handshake from peer %d (%s)", idx,
+                 from ? "direct" : "relay");
     }
     if (pkt[0] == WG_MSG_RESPONSE)
         ESP_LOGI(TAG, "*** WireGuard session established with peer %d ***", idx);
@@ -340,24 +386,12 @@ static void drain_tun_queue(void) {
         n = peers_count();
         for (i = 0; i < n; i++) {
             peer_entry *e = peers_at(i);
-            const ts_path *best;
-            uint8_t v4[4];
-            struct sockaddr_in dst;
 
             if (!e || e->tailnet_ip_be != tx.dst_be) continue;
             if (e->wg_index < 0 || !wg_is_established(s_wg, e->wg_index)) break;
-            best = ts_path_best(s_eng, e->path_index);
-            if (!best || !disco_is_ipv4_mapped(best->ip, v4)) break;
             if (wg_encrypt(s_wg, e->wg_index, tx.data, tx.len,
                            out, sizeof(out), &out_len) != 0) break;
-
-            memset(&dst, 0, sizeof(dst));
-            dst.sin_family = AF_INET;
-            dst.sin_port = htons(best->port);
-            memcpy(&dst.sin_addr, v4, 4);
-            UNLOCK();
-            sendto(s_sock, out, out_len, 0, (struct sockaddr *)&dst, sizeof(dst));
-            LOCK();
+            send_to_peer(e, out, out_len);
             break;
         }
         UNLOCK();
@@ -375,23 +409,18 @@ static void wg_maintain(void) {
         peer_entry *e = peers_at(i);
         const ts_path *best;
         static uint8_t init[WG_INITIATION_SIZE];
-        uint8_t v4[4];
-        struct sockaddr_in dst;
 
-        if (!e || e->wg_index < 0 || e->path_index < 0) continue;
+        if (!e || e->wg_index < 0) continue;
         if (!wg_needs_handshake(s_wg, e->wg_index)) continue;
-
-        best = ts_path_best(s_eng, e->path_index);
-        if (!best || !disco_is_ipv4_mapped(best->ip, v4)) continue;
+        // A relay will do when there is no path; without this, a peer behind
+        // carrier NAT would never get a tunnel at all.
+        best = TSESP_FORCE_RELAY ? NULL :
+            (e->path_index >= 0 ? ts_path_best(s_eng, e->path_index) : NULL);
+        if (!best && !(e->has_node_key && derp_task_connected())) continue;
 
         if (wg_create_initiation(s_wg, e->wg_index, init) != 0) continue;
-        memset(&dst, 0, sizeof(dst));
-        dst.sin_family = AF_INET;
-        dst.sin_port = htons(best->port);
-        memcpy(&dst.sin_addr, v4, 4);
-        sendto(s_sock, init, sizeof(init), 0, (struct sockaddr *)&dst, sizeof(dst));
-        ESP_LOGI(TAG, "handshake -> %s (%u.%u.%u.%u:%u)",
-                 e->name, v4[0], v4[1], v4[2], v4[3], best->port);
+        if (send_to_peer(e, init, sizeof(init)) != 0) continue;
+        ESP_LOGI(TAG, "handshake -> %s (%s)", e->name, best ? "direct" : "relay");
         return;                 // one per tick
     }
 }

@@ -127,9 +127,34 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
         snprintf(s_tailnet_addr, sizeof(s_tailnet_addr), "%s", info->self_addrs[0]);
     // The relay hostnames only exist inside the netmap, so this is the first
     // moment the device knows where to connect.
-    if (info->nderp > 0 && info->derp[0].host[0])
-        derp_task_set_region(info->derp[0].region_id, info->derp[0].host,
-                             info->derp[0].code);
+    //
+    // Which region to use is chosen by looking at the peers: they are the
+    // machines this device actually talks to, and they have already measured
+    // their own latencies. Following the majority lands on a relay that is
+    // near them, and near us, without probing anything - which matters here
+    // because this ISP blackholes the UDP that probing would use.
+    if (info->nderp > 0 && !derp_task_region()) {
+        int counts[TS_MAX_DERP_REGIONS];
+        int i, j, best = 0, n = peers_count();
+
+        memset(counts, 0, sizeof(counts));
+        for (i = 0; i < n; i++) {
+            peer_entry *e = peers_at(i);
+            if (!e || !e->home_derp) continue;
+            for (j = 0; j < info->nderp; j++)
+                if (info->derp[j].region_id == e->home_derp) counts[j]++;
+        }
+        for (j = 1; j < info->nderp; j++)
+            if (counts[j] > counts[best]) best = j;
+
+        if (info->derp[best].host[0]) {
+            ESP_LOGI(TAG, "relay region %u (%s) chosen; %d of %d peers use it",
+                     info->derp[best].region_id, info->derp[best].code,
+                     counts[best], n);
+            derp_task_set_region(info->derp[best].region_id,
+                                 info->derp[best].host, info->derp[best].code);
+        }
+    }
 
     // Hand the freshly merged table to path discovery, then let it probe.
     magic_sync_peers();
