@@ -78,6 +78,10 @@ typedef struct {
     // even on the same LAN.
     int            preferred_derp;
     int            working_udp;
+    // Networks this device offers to route for, as "192.168.1.0/24". A peer
+    // can only use them once they are approved in the admin console.
+    const char    *routes[2];
+    int            nroutes;
 } ts_map_req;
 
 // POSTs /machine/map and streams the response through `parser`. With

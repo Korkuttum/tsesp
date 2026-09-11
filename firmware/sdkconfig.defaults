@@ -18,3 +18,8 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Subnet routing: forward IP between the tunnel and the LAN, and masquerade
+# so replies from LAN devices come back through this device.
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y

@@ -310,11 +310,23 @@ static int build_map_body(const ts_map_req *req, char *body, size_t cap,
     char nodekey[65], discokey[65], hostname[96];
     char endpoints[TS_MAX_SELF_ENDPOINTS * 56 + 24];
     char netinfo[160];
+    char routes[80];
     int n, i;
 
     hex32(nodekey, req->node_pub);
     hex32(discokey, req->disco_pub);
     json_escape(hostname, sizeof(hostname), req->hostname ? req->hostname : "tsesp");
+
+    routes[0] = '\0';
+    if (req->nroutes > 0) {
+        size_t o = (size_t)snprintf(routes, sizeof(routes), ",\"RoutableIPs\":[");
+        for (i = 0; i < req->nroutes && i < 2; i++) {
+            if (!req->routes[i] || !req->routes[i][0]) continue;
+            o += (size_t)snprintf(routes + o, sizeof(routes) - o, "%s\"%s\"",
+                                  i ? "," : "", req->routes[i]);
+        }
+        snprintf(routes + o, sizeof(routes) - o, "]");
+    }
 
     netinfo[0] = '\0';
     if (req->preferred_derp > 0) {
@@ -346,13 +358,12 @@ static int build_map_body(const ts_map_req *req, char *body, size_t cap,
                  "{\"Version\":%d"
                  ",\"NodeKey\":\"nodekey:%s\""
                  ",\"DiscoKey\":\"discokey:%s\""
-                 // Deliberately minimal: control appears to ignore this whole
-                 // object, and a smaller one narrows down whether a field is
-                 // to blame.
-                 ",\"Hostinfo\":{\"OS\":\"esp32\",\"Hostname\":\"%s\"%s}"
+                 ",\"Hostinfo\":{\"OS\":\"esp32\",\"Hostname\":\"%s\""
+                 ",\"IPNVersion\":\"0.1.0\""
+                 ",\"DeviceModel\":\"ESP32-WROOM-32U\"%s%s}"
                  "%s%s%s}",
                  req->capver > 0 ? req->capver : TS2021_PROTOCOL_VERSION,
-                 nodekey, discokey, hostname, netinfo,
+                 nodekey, discokey, hostname, routes, netinfo,
                  stream ? ",\"Stream\":true" : "",
                  omit_peers ? ",\"OmitPeers\":true" : "",
                  endpoints);

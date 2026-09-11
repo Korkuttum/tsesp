@@ -29,6 +29,7 @@
 #include "magic.h"
 #include "derp_task.h"
 #include "tun.h"
+#include "lwip/lwip_napt.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
@@ -58,7 +59,10 @@ static char s_tailnet_addr[48];
 static char s_login_url[TS_AUTH_URL_MAX];
 static bool s_stun_done;
 static volatile bool s_push_wanted;
+static uint32_t s_last_push_ms;
 static char s_local_ep[32];      // 192.168.x.y:41641
+static char s_route[24];         // the LAN we offer to route for
+static bool s_napt_on;
 static char s_public_ep[52];     // what STUN told us, if anything
 
 static void log_request_body(const char *body, size_t len) {
@@ -259,10 +263,15 @@ static void push_endpoints(void) {
     req.preferred_derp = derp_task_region();
     req.working_udp = 1;
     collect_endpoints(&req);
+    if (s_route[0]) {
+        req.routes[0] = s_route;
+        req.nroutes = 1;
+    }
 
     rc = ts_control_update_endpoints(tc, &req, &status);
-    ESP_LOGI(TAG, "endpoint update: rc=%d http=%d, sent %d endpoint(s), derp %u",
-             rc, status, req.nendpoints, derp_task_region());
+    ESP_LOGI(TAG, "endpoint update: rc=%d http=%d, %d endpoint(s), derp %u, routes %s",
+             rc, status, req.nendpoints, derp_task_region(),
+             req.nroutes ? req.routes[0] : "none");
 
     esp_io_close(&io);
     free(tc);
@@ -281,12 +290,17 @@ static ts_result do_map(void) {
     // make the control plane treat us as a reachable node and hand our disco
     // key to peers. Once DERP is implemented this becomes a measured value.
     req.capver = TSESP_MAP_CAPVER;
-    // Report the relay we are actually on, not one we hope to reach. The
-    // control plane appears to use this to decide whether to introduce us to
-    // our peers at all.
     req.preferred_derp = derp_task_region();
     req.working_udp = 1;
+    if (s_route[0]) {
+        req.routes[0] = s_route;
+        req.nroutes = 1;
+    }
     collect_endpoints(&req);
+    if (s_route[0]) {
+        req.routes[0] = s_route;
+        req.nroutes = 1;
+    }
     if (req.nendpoints)
         ESP_LOGI(TAG, "advertising %d endpoint(s): %s%s%s", req.nendpoints,
                  req.endpoints[0],
@@ -313,7 +327,14 @@ static void control_task(void *arg) {
         switch (act.kind) {
         case TS_ACT_WAIT:
             publish_status(ts_client_state_name(s_client.state));
-            if (s_push_wanted) { s_push_wanted = false; push_endpoints(); }
+            // Real clients re-announce as their addresses change; doing it
+            // on a timer also covers a relay that came up after the last one.
+            if (s_push_wanted ||
+                (uint32_t)(now_ms() - s_last_push_ms) > 60000) {
+                s_push_wanted = false;
+                s_last_push_ms = now_ms();
+                push_endpoints();
+            }
             vTaskDelay(pdMS_TO_TICKS(act.wait_ms ? act.wait_ms : 200));
             continue;
 
@@ -420,6 +441,18 @@ void app_main(void) {
             v4[2] = (uint8_t)(host_order >> 8);  v4[3] = (uint8_t)host_order;
             ts_netmap_set_local_v4(v4, 24);
             ESP_LOGI(TAG, "local network %u.%u.%u.0/24", v4[0], v4[1], v4[2]);
+
+            // Offer to carry traffic for this network. Peers can only use it
+            // after the route is approved in the admin console.
+            snprintf(s_route, sizeof(s_route), "%u.%u.%u.0/24", v4[0], v4[1], v4[2]);
+
+            // Masquerade forwarded packets as coming from this device, so a
+            // LAN machine that knows nothing about the tailnet still knows
+            // where to send its replies.
+            ip_napt_enable(ip.ip.addr, 1);
+            s_napt_on = true;
+            ESP_LOGI(TAG, "subnet routing ready for %s "
+                          "(approve the route in the admin console)", s_route);
         }
     }
 
