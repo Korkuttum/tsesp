@@ -53,7 +53,13 @@ peer_entry *peers_upsert(const ts_peer *p) {
     // Only overwrite what the update actually carried. An incremental record
     // arrives with empty endpoints, and treating that as "no endpoints" would
     // delete the addresses we need to reach this peer.
-    if (p->name[0])       snprintf(e->name, sizeof(e->name), "%s", p->name);
+    if (p->name[0]) {
+        // "tsesp-1.example.ts.net." is correct DNS and reads as a typo to
+        // everyone else; drop the root label.
+        size_t n = strlen(p->name);
+        if (n && p->name[n - 1] == '.') n--;
+        snprintf(e->name, sizeof(e->name), "%.*s", (int)n, p->name);
+    }
     if (p->naddrs) {
         snprintf(e->addr, sizeof(e->addr), "%s", p->addrs[0]);
         // "100.65.96.112/32" -> the address alone, for routing decisions.

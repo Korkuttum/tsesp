@@ -167,7 +167,7 @@ static const char CSS[] =
     ".cell .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}"
     ".cell .v{font-size:17px;margin-top:4px;font-variant-numeric:tabular-nums;"
     "font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
-    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit}"
+    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;white-space:nowrap}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
@@ -179,6 +179,9 @@ static const char CSS[] =
     "align-items:center}"
     ".cp:hover{color:var(--fg);background:var(--hover)}"
     ".cp.done{color:var(--green)}"
+    ".cp.sm{padding:0 0 0 5px;vertical-align:-2px;opacity:.45}"
+    ".cp.sm:hover{opacity:1;background:none}"
+    ".cp.sm svg{width:13px;height:13px}"
     "h2{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;"
     "margin:18px 0 8px}"
     "h2:first-child{margin-top:0}"
@@ -200,9 +203,10 @@ static const char CSS[] =
     ".peer{display:flex;align-items:center;gap:11px;background:var(--card);"
     "border:1px solid var(--line);border-radius:11px;padding:11px 13px;margin-bottom:7px}"
     ".peer .nm{flex:1;min-width:0}"
-    ".peer .nm b{display:block;font-weight:500;font-size:14px;overflow:hidden;"
-    "text-overflow:ellipsis;white-space:nowrap}"
-    ".peer .nm span{color:var(--dim);font-size:12px;font-family:ui-monospace,Menlo,monospace}"
+    ".peer .nm b{display:flex;align-items:center;font-weight:500;font-size:14px}"
+    ".peer .nm b>button{flex:0 0 auto}"
+    ".peer .nm span{display:flex;align-items:center;color:var(--dim);font-size:12px;"
+    "font-family:ui-monospace,Menlo,monospace}"
     ".tag{font-size:11px;padding:4px 9px;border-radius:20px;white-space:nowrap}"
     ".tag.direct{background:rgba(34,197,94,.16);color:var(--green)}"
     ".tag.relay{background:rgba(59,130,246,.16);color:var(--blue)}"
@@ -598,7 +602,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Doğrudan bağlanan</div><div class=v>%d<small> cihaz</small></div></div>"
         "<div class=cell><div class=k>Şifreli tünel</div><div class=v>%d<small> açık</small></div></div>"
         "<div class=cell><div class=k>Çalışma süresi</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Tünel trafiği</div><div class=v>%u<small> alınan / %u gönderilen paket</small></div></div>"
+        "<div class=cell><div class=k>Alınan paket</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>Gönderilen paket</div><div class=v>%u</div></div>"
         "</div></div>",
         (copy_cell_ex(c5, sizeof(c5), "Cihaz adı",
                       s_status.name && s_status.name[0] ? s_status.name : "-", 1), c5),
@@ -617,9 +622,11 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<h2>Adresler</h2><p class=hint>&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.</p><div class=grid>"
         "%s%s%s</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
-        "<div class=cell><div class=k>Doğrudan bağlanma denemesi</div><div class=v>%u<small> deneme, %u yanıt</small></div></div>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Ara sunucudan geçen</div><div class=v>%u<small> gönderildi, %u alındı</small></div></div>"
+        "<div class=cell><div class=k>Bağlantı denemesi</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>Gelen yanıt</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>Röleden giden</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>Röleden gelen</div><div class=v>%u</div></div>"
         "</div></div>",
         wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), channel,
         (copy_cell(c2, sizeof(c2), "Ev ağındaki adresi", ip), c2),
@@ -627,8 +634,8 @@ static esp_err_t get_status(httpd_req_t *req) {
                    magic_get_public(pub, sizeof(pub)) ? pub : "henüz belirlenmedi"), c3),
         (copy_cell(c4, sizeof(c4), "Paylaşılan ev ağı",
                    s_status.route[0] ? s_status.route : "-"), c4),
-        (unsigned)pings, (unsigned)pongs,
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
+        (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);
 
     /* ---- Peer'lar ---- */
@@ -655,10 +662,19 @@ static esp_err_t get_status(httpd_req_t *req) {
             snprintf(tag, sizeof(tag), "<span class='tag none'>bağlantı yok</span>");
 
         html_escape(nm, sizeof(nm), e->name[0] ? e->name : "(isimsiz)");
+        bare_addr(e->addr, bare, sizeof(bare));
         o += snprintf(page + o, cap - o,
             "<div class=peer><span class='dot %s'></span>"
-            "<div class=nm><b>%s</b><span>%s</span></div>%s</div>",
-            e->online ? "ok" : "none", nm, e->addr[0] ? e->addr : "-", tag);
+            "<div class=nm>"
+            "<b>%s<button class='cp sm' onclick=\"cp(this,'%s')\" "
+            "title='Adı kopyala'>" ICON_COPY "</button></b>"
+            "<span>%s<button class='cp sm' onclick=\"cp(this,'%s')\" "
+            "title='Adresi kopyala'>" ICON_COPY "</button></span>"
+            "</div>%s</div>",
+            e->online ? "ok" : "none",
+            nm, nm,
+            e->addr[0] ? bare : "-", e->addr[0] ? bare : "-",
+            tag);
     }
     o += snprintf(page + o, cap - o, "</div>");
 
@@ -684,7 +700,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=grid>"
         "<div class=cell><div class=k>Kullanılan</div><div class=v>%u<small> KB</small></div>%s</div>"
         "<div class=cell><div class=k>Boş</div><div class=v>%u<small> KB</small></div></div>"
-        "<div class=cell><div class=k>En az boş (açılıştan beri)</div>"
+        "<div class=cell><div class=k>En az boş</div>"
         "<div class=v>%u<small> KB</small></div></div>"
         "</div>",
         (unsigned)(heap_total / 1024),
