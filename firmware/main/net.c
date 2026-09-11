@@ -101,6 +101,11 @@ bool net_start(void) {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
         ESP_ERROR_CHECK(esp_wifi_start());
+        // Power save has the access point hold packets until the station
+        // next wakes, which shows up as latency spikes of a hundred
+        // milliseconds and more. A device meant to route for other machines
+        // should stay awake.
+        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     }
     ESP_LOGI(TAG, "joining %s", ssid);
 
