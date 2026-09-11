@@ -170,6 +170,57 @@ MIT — bkz. [LICENSE](LICENSE). Üçüncü taraf kod ve atıflar için [NOTICE.
 
 Tailscale Inc. ile ilişkili değildir, onun tarafından onaylanmamıştır.
 
+## Gereksinimler
+
+### Donanım
+
+**Test edilen:** ESP32-D0WD-V3 (WROOM-32U), 4 MB flash, PSRAM yok, 240 MHz.
+Bütün ölçümler bu çipte alındı ve aşağıdaki her şey bu kartta çalıştırıldı.
+
+**Asgari gereksinimler:**
+
+| | |
+|---|---|
+| Flash | **4 MB** — `partitions.csv` uygulamaya 2 MB veriyor, derlenen firmware 1.06 MB. 2 MB'lık bir modülde bölüm tablosunu küçültmen gerekir. |
+| RAM | PSRAM gerekmiyor. Her şey ayaktayken ~97 KB heap boş kalıyor. |
+| WiFi | 2.4 GHz. Kurulum portalı için AP+STA modu kullanılıyor. |
+| ESP-IDF | v5.3.1 ile geliştirildi ve test edildi. |
+
+### Diğer ESP32 çeşitleri
+
+Kodda assembly yok, çipe özel register yok, endian varsayımı yok — kripto
+bayt bayt okuyor. Yani taşınabilir olması **bekleniyor**, ama beklemek test
+değil:
+
+| Çip | Durum |
+|---|---|
+| ESP32 (WROOM-32/32D/32U, WROVER) | ✅ **çalıştırıldı** (WROOM-32U), diğerleri aynı çekirdek |
+| ESP32-S3 | ⚠️ **temiz derleniyor**, karta atılmadı |
+| ESP32-C3 / C6 / H2 (RISC-V) | ❓ **denenmedi** — bu makinede RISC-V derleyicisi kurulu değil (`install.sh esp32c3` gerekir) |
+| ESP32-S2 | ❓ denenmedi |
+| ESP8266 | ❌ olmaz — ESP-IDF v5 desteklemiyor, RAM de yetmez |
+
+Tek çekirdekli çeşitler (S2, C3, SOLO-1) için bilinen bir engel yok; kod iki
+çekirdeğe bağımlı değil. Ama yine de denenmedi.
+
+### Ağ tarafı
+
+- Bir Tailscale hesabı. Headscale de çalışmalı — `TS2021_TAILSCALE_CONTROL_KEY`
+  ve sunucu adresi değişir — ama **denenmedi**.
+- Kontrol düzlemi için giden **TCP 80**, röle için giden **TCP 443**.
+- UDP 41641 giden — kapalıysa doğrudan yol kurulamaz, her şey röleden gider.
+- Subnet routing için: rotanın admin panelde **onaylanması**, ve bağlanan
+  cihazda **"use subnet routes"** açık olması.
+
+### Bilinen sınırlar
+
+- Hız 1-3 Mbps civarı. Ölçülen AEAD tavanı 1.35 MB/s, üstüne WiFi ve lwIP payı
+  biniyor. SSH, sensör, cihaz arayüzü için yeter; video için yetmez.
+- El sıkışma anlarında ~100 ms gecikme sıçraması: X25519 bu çipte 180 ms
+  sürüyor ve o sırada alıcı görev başka iş yapmıyor.
+- Aynı anda en fazla 8 WireGuard peer'ı, 16 yol keşfi peer'ı (derleme sabiti).
+- IPv6 tailnet adresi atanıyor ama kullanılmıyor; her şey IPv4 üzerinden.
+
 ## NAT gerçeği
 
 `build/path_test` motoru gerçek ev modemlerinin davranışlarına karşı çalıştırır.
