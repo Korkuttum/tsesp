@@ -10,34 +10,52 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 
 | Aşama | İş | Durum |
 |---|---|---|
-| 1 | Kripto: BLAKE2s, HKDF, X25519, ChaCha20-Poly1305 | ✅ RFC 7693/7748/8439 vektörleri |
+| 1 | Kripto: BLAKE2s (anahtarlı dahil), HKDF, X25519, ChaCha20-Poly1305 | ✅ RFC vektörleri |
 | 2 | ts2021 Noise IK handshake + record framing | ✅ canlı sunucuya karşı |
-| 3a | HPACK codec | ✅ RFC 7541 Ek C'nin 16 örneği |
-| 3b | Noise içinde minimal HTTP/2 istemcisi | ✅ canlı sunucuya karşı |
-| 3c | Streaming JSON parser | ✅ her bölünme noktasında aynı sonuç |
-| 4 | `/machine/register` → gerçek login URL'i | ✅ HTTP 200, URL alındı |
-| 5 | `/machine/map` → peer listesi + 100.x IP | ✅ gerçek tailnet'ten çekildi |
-| 6a | STUN istemcisi | ✅ RFC 5769 vektörü |
-| 6b | NaCl box (Curve25519 + XSalsa20-Poly1305) | ✅ libsodium'la bayt bayt aynı |
-| 6c | DISCO ping/pong/call-me-maybe mesajları | ✅ wire format testleri |
-| 7 | Yol keşfi motoru (ping/ölç/seç/canlı tut) | ✅ sahte NAT'larla test edildi |
-| 7b | Cihaz durum makinesi (bağlan/kaydol/geri çekil) | ✅ sahte saatle test edildi |
-| 8 | WireGuard veri düzlemi (esp_wireguard) | ⬜ kart gerektiriyor |
-| 9 | NAPT subnet routing — ev ağındaki cihazlara erişim | ⬜ |
-| 10 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ⬜ |
-| 11 | DERP relay (TLS gerektirir, bellek baskısı) | ⬜ simetrik NAT'ta şart |
+| 3 | HPACK + HTTP/2 + streaming JSON | ✅ RFC 7541 Ek C; her bölünme noktası |
+| 4 | `/machine/register` → tailnet'e kayıt | ✅ kartta |
+| 5 | `/machine/map` → netmap, peer'lar, DERP haritası | ✅ kartta, uzun bağlantı |
+| 6 | NaCl box + DISCO + STUN | ✅ libsodium/RFC 5769 ile doğrulandı |
+| 7 | Yol keşfi (ping/ölç/seç/canlı tut) | ✅ sahte NAT'lar + gerçek peer'lar |
+| 8 | DERP rölesi (TLS) — varlık **ve** veri | ✅ doğrudan yol kapalıyken test edildi |
+| 9 | WireGuard (Noise IKpsk2) | ✅ gerçek Tailscale düğümleriyle tünel |
+| 10 | lwIP arayüzü — cihaz kendi 100.x adresinde | ✅ ping %0 kayıp, sayfa tünelden |
+| 11 | NAPT subnet routing | ✅ kod hazır, **rota onayı + saha testi bekliyor** |
+| 12 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ✅ |
 
-Kontrol düzlemi çalışıyor. Uçtan uca doğrulanmış zincir:
+Zincirin tamamı kartta çalışıyor:
 
 ```
-TCP :80 -> POST /ts2021 upgrade -> Noise IK -> early payload
-        -> HTTP/2 + HPACK -> POST /machine/register -> AuthURL -> kayıt
-                          -> POST /machine/map      -> netmap -> 100.x adres
+WiFi kurulumu (AP + kurulum sayfası)
+  -> TCP :80 -> /ts2021 upgrade -> Noise IK -> HTTP/2 -> kayıt -> netmap
+  -> DERP rölesi (TLS 443)         <- varlık ve yedek veri yolu
+  -> DISCO ping/pong               -> doğrudan yol (NAT delme)
+  -> WireGuard (Noise IKpsk2)      -> tünel
+  -> lwIP arayüzü 100.64.0.0/10    -> cihaz ağda görünür
+  -> IP forward + NAPT             -> ev ağındaki cihazlara erişim
 ```
 
-Kontrol düzlemi bitti. Cihaz gerçek bir tailnet'te kayıtlı, kendi adresini ve
-peer'larının anahtar/endpoint'lerini çekebiliyor. Kalan iş veri düzlemi:
-paketleri gerçekten taşımak.
+Ölçülenler (ESP32-D0WD-V3, 240 MHz):
+
+```
+tailnet adresine ping     %0 kayıp, ortalama 20 ms   (doğrudan yol)
+                          %0 kayıp, ortalama 480 ms  (sadece röle)
+durum sayfası tünelden    http 200, 0.36 s
+X25519                    180 ms      <- en yavaş işlem
+ChaCha20-Poly1305         1.35 MB/s   <- veri düzleminin tavanı
+boş heap (her şey açık)   ~97 KB
+```
+
+## Kaldığı yer
+
+Kod tarafında bitmemiş bir şey yok; eksik olan **saha testi**:
+
+1. Admin panelde ilan edilen rotayı onayla
+2. Bağlanacağın cihazda "subnet route'ları kullan"ı aç
+3. **Mobil veriden** (WiFi kapalı) ev ağındaki bir adrese eriş
+
+Doğrulanmamışlar: saatler/günler süren kararlılık, WiFi koptuğunda toparlanma,
+yük altında davranış. Hız beklentisi 1-3 Mbps.
 
 ## Neden PSRAM'siz çalışabiliyor
 
