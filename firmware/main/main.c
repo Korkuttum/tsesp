@@ -430,21 +430,37 @@ void app_main(void) {
     }
 
     // Scoring a peer's endpoints needs to know which network we are on: an
-    // address on this same LAN is worth more than any public one.
+    // address on this same LAN is worth more than any public one. The route
+    // we offer comes from the same place.
     {
         esp_netif_ip_info_t ip;
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK) {
-            uint8_t v4[4];
             uint32_t host_order = ntohl(ip.ip.addr);
+            uint32_t mask = ntohl(ip.netmask.addr);
+            uint8_t v4[4], net[4];
+            int prefix = 0;
+
             v4[0] = (uint8_t)(host_order >> 24); v4[1] = (uint8_t)(host_order >> 16);
             v4[2] = (uint8_t)(host_order >> 8);  v4[3] = (uint8_t)host_order;
-            ts_netmap_set_local_v4(v4, 24);
-            ESP_LOGI(TAG, "local network %u.%u.%u.0/24", v4[0], v4[1], v4[2]);
 
-            // Offer to carry traffic for this network. Peers can only use it
-            // after the route is approved in the admin console.
-            snprintf(s_route, sizeof(s_route), "%u.%u.%u.0/24", v4[0], v4[1], v4[2]);
+            // Read the prefix length off the interface rather than assuming
+            // /24. Plenty of routers hand out something else, and a wrong
+            // prefix means advertising a route that does not match the LAN.
+            while (prefix < 32 && (mask & (0x80000000u >> prefix))) prefix++;
+            if (prefix == 0 || prefix > 30) prefix = 24;   // nothing sane: fall back
+
+            ts_netmap_set_local_v4(v4, (uint8_t)prefix);
+
+            {
+                uint32_t network = host_order & mask;
+                net[0] = (uint8_t)(network >> 24); net[1] = (uint8_t)(network >> 16);
+                net[2] = (uint8_t)(network >> 8);  net[3] = (uint8_t)network;
+                snprintf(s_route, sizeof(s_route), "%u.%u.%u.%u/%d",
+                         net[0], net[1], net[2], net[3], prefix);
+            }
+            ESP_LOGI(TAG, "local network %s (this device is %u.%u.%u.%u)",
+                     s_route, v4[0], v4[1], v4[2], v4[3]);
 
             // Masquerade forwarded packets as coming from this device, so a
             // LAN machine that knows nothing about the tailnet still knows
