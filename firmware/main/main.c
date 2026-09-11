@@ -56,6 +56,7 @@ static ts_netmap_parser s_netmap;
 static ts_client       s_client;
 
 static char s_tailnet_addr[48];
+static char s_magic_name[TS_NAME_STR];
 static char s_login_url[TS_AUTH_URL_MAX];
 static bool s_stun_done;
 static volatile bool s_push_wanted;
@@ -79,7 +80,9 @@ static void publish_status(const char *state) {
     portal_status st = {
         .state = state,
         .tailnet_addr = s_tailnet_addr,
+        .name = s_magic_name,
         .login_url = s_login_url,
+        .route = s_route,
         .peers = peers_count(),
         .paths_up = magic_paths_up(),
         .free_heap = (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
@@ -125,6 +128,13 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
     }
     if (info->self_naddrs)
         snprintf(s_tailnet_addr, sizeof(s_tailnet_addr), "%s", info->self_addrs[0]);
+    if (info->self_name[0]) {
+        // Drop the trailing dot the control plane includes; it is correct DNS
+        // and looks like a typo to everyone else.
+        size_t n = strlen(info->self_name);
+        snprintf(s_magic_name, sizeof(s_magic_name), "%.*s",
+                 (int)(n && info->self_name[n - 1] == '.' ? n - 1 : n), info->self_name);
+    }
     // The relay hostnames only exist inside the netmap, so this is the first
     // moment the device knows where to connect.
     //
@@ -528,5 +538,8 @@ void app_main(void) {
     ESP_LOGI(TAG, "free heap before control plane: %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
-    xTaskCreate(control_task, "control", 8192, NULL, 5, NULL);
+    // The status page reported 1 KB of headroom left here: this task runs
+    // X25519, HTTP/2 and the JSON parser on one stack, and a kilobyte is
+    // one deep call away from the overflow we already hit once.
+    xTaskCreate(control_task, "control", 12288, NULL, 5, NULL);
 }

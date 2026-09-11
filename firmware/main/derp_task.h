@@ -11,6 +11,8 @@ void derp_task_set_region(uint16_t region_id, const char *host, const char *code
 // The region we are actually connected to, or 0. This is what gets reported
 // to the control plane as our home relay.
 uint16_t derp_task_region(void);
+// The relay's city, for display. Empty when not connected.
+const char *derp_task_region_name(void);
 bool     derp_task_connected(void);
 void     derp_task_stats(uint32_t *sent, uint32_t *received);
 // True once the relay region changed since the last map request, so the

@@ -210,10 +210,40 @@ void magic_stats(uint32_t *pings, uint32_t *pongs) {
 
 void magic_request_stun(void) { s_stun_tries = 0; s_stun_wanted = true; }
 
-bool magic_get_public(char *out, size_t cap) {
-    if (!s_public[0]) return false;
-    snprintf(out, cap, "%s", s_public);
+// A peer on our own network sees us at our LAN address, which answers a
+// different question than "how does the internet see this device". Only an
+// address that is routable on the public internet belongs under that label.
+static bool is_public_v4(const uint8_t v4[4]) {
+    if (v4[0] == 10 || v4[0] == 127) return false;
+    if (v4[0] == 192 && v4[1] == 168) return false;
+    if (v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) return false;
+    if (v4[0] == 169 && v4[1] == 254) return false;
+    if (v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127) return false;  // CGNAT
+    if (v4[0] == 0 || v4[0] >= 224) return false;
     return true;
+}
+
+bool magic_get_public(char *out, size_t cap) {
+    if (s_public[0]) {
+        snprintf(out, cap, "%s", s_public);
+        return true;
+    }
+    // STUN is blocked on some networks. A peer's pong says where our packet
+    // appeared to come from, which answers the same question and is proof it
+    // arrived somewhere.
+    if (s_eng) {
+        uint8_t ip[16], v4[4];
+        uint16_t port = 0;
+        LOCK();
+        if (ts_path_observed_address(s_eng, ip, &port) &&
+            disco_is_ipv4_mapped(ip, v4) && is_public_v4(v4)) {
+            snprintf(out, cap, "%u.%u.%u.%u:%u", v4[0], v4[1], v4[2], v4[3], port);
+            UNLOCK();
+            return true;
+        }
+        UNLOCK();
+    }
+    return false;
 }
 
 // Sends one binding request from the DISCO socket. The reply is picked up by

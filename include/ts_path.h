@@ -89,6 +89,14 @@ typedef struct {
     ts_path_peer peers[TS_MAX_PEERS];
     int          npeers;
 
+    // Peers tell us where our packets appear to come from. On a network
+    // where STUN is blocked this is the only way to learn our public
+    // address, and it is more trustworthy anyway: it is the address that
+    // actually reached someone.
+    uint8_t  observed_ip[16];
+    uint16_t observed_port;
+    int      has_observed;
+
     // Counters, useful in tests and in the device's status page.
     uint32_t pings_sent, pongs_sent, pongs_received, unknown_senders;
 } ts_path_engine;
@@ -118,5 +126,9 @@ int  ts_path_on_datagram(ts_path_engine *e,
 // The address currently believed to reach this peer, or NULL if none does.
 const ts_path *ts_path_best(const ts_path_engine *e, int peer_index);
 int  ts_path_find_peer(const ts_path_engine *e, uint64_t id);
+
+// Our own address as a peer reported seeing it. Returns 0 if unknown.
+int  ts_path_observed_address(const ts_path_engine *e,
+                              uint8_t ip[16], uint16_t *port);
 
 #endif

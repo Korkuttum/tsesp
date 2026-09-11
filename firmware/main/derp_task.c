@@ -70,6 +70,22 @@ int derp_task_send(const uint8_t dst_node_pub[32], const uint8_t *pkt, size_t le
 
 uint16_t derp_task_region(void) { return s_connected_region; }
 
+const char *derp_task_region_name(void) {
+    // Tailscale names its regions with airport-style codes; a person reading
+    // a status page wants the city.
+    static const struct { const char *code, *city; } kCities[] = {
+        { "fra", "Frankfurt" }, { "ams", "Amsterdam" }, { "lhr", "Londra" },
+        { "par", "Paris" },     { "nue", "Nürnberg" },  { "waw", "Varşova" },
+        { "mad", "Madrid" },    { "hel", "Helsinki" },  { "dbi", "Dubai" },
+        { "nyc", "New York" },  { "ist", "İstanbul" },
+    };
+    size_t i;
+    if (!s_connected_region) return "";
+    for (i = 0; i < sizeof(kCities) / sizeof(kCities[0]); i++)
+        if (!strcmp(s_code, kCities[i].code)) return kCities[i].city;
+    return s_code;
+}
+
 bool derp_task_take_changed(void) {
     bool v = s_changed;
     s_changed = false;

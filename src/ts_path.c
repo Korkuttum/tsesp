@@ -295,6 +295,15 @@ int ts_path_on_datagram(ts_path_engine *e,
         return 1;
 
     case DISCO_PONG:
+        // The peer echoes where our ping came from. Believe the first one and
+        // any that agree; a changed value means our mapping moved.
+        if (m.src_port) {
+            memcpy(e->observed_ip, m.src_ip, 16);
+            e->observed_port = m.src_port;
+            e->has_observed = 1;
+        }
+        // A peer on the same network reports our LAN address, which is true
+        // but answers a different question; the caller filters for that.
         for (j = 0; j < p->npaths; j++) {
             ts_path *c = &p->paths[j];
             if (memcmp(c->txid, m.txid, DISCO_TXID_LEN) != 0) continue;
@@ -323,6 +332,13 @@ int ts_path_on_datagram(ts_path_engine *e,
     default:
         return 1;
     }
+}
+
+int ts_path_observed_address(const ts_path_engine *e, uint8_t ip[16], uint16_t *port) {
+    if (!e->has_observed) return 0;
+    memcpy(ip, e->observed_ip, 16);
+    *port = e->observed_port;
+    return 1;
 }
 
 const ts_path *ts_path_best(const ts_path_engine *e, int peer_index) {

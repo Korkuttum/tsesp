@@ -122,6 +122,17 @@ bool net_start(void) {
     }
 }
 
+void net_get_wifi_info(char *ssid, size_t cap, int *rssi, int *channel) {
+    wifi_ap_record_t ap;
+    if (ssid && cap) ssid[0] = '\0';
+    if (rssi) *rssi = 0;
+    if (channel) *channel = 0;
+    if (!s_connected || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
+    if (ssid && cap) snprintf(ssid, cap, "%s", (const char *)ap.ssid);
+    if (rssi) *rssi = ap.rssi;
+    if (channel) *channel = ap.primary;
+}
+
 bool net_is_connected(void) { return s_connected; }
 void net_get_ip(char *out, size_t cap) { snprintf(out, cap, "%s", s_ip); }
 void net_get_ap_ssid(char *out, size_t cap) { snprintf(out, cap, "%s", s_ap_ssid); }
