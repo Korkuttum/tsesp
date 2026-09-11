@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 #include "disco.h"
 #include "wireguard.h"
 #include <time.h>
+#include "tun.h"
 
 static const char *TAG = "magic";
 
@@ -38,6 +40,20 @@ static char          s_public[48];
 static uint32_t      s_rx_packets;
 static int           s_stun_tries;
 static wg_device    *s_wg;
+
+// Packets lwIP wants to put into the tunnel.
+//
+// tun_send_cb runs on the lwIP thread, where two things are forbidden:
+// calling the socket API, which posts to that same thread and waits for
+// itself, and blocking on a lock the receive task may hold for the 180 ms an
+// X25519 takes. So it only hands the packet over, and the work happens here.
+typedef struct {
+    uint32_t dst_be;
+    uint16_t len;
+    uint8_t *data;
+} tun_tx;
+
+static QueueHandle_t s_txq;
 
 #define LOCK()   xSemaphoreTake(s_lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_lock)
@@ -278,11 +294,80 @@ static void handle_wireguard(const uint8_t *pkt, size_t len,
     }
     if (pkt[0] == WG_MSG_RESPONSE)
         ESP_LOGI(TAG, "*** WireGuard session established with peer %d ***", idx);
-    if (pkt[0] == WG_MSG_TRANSPORT && plain_len)
-        ESP_LOGI(TAG, "tunnel packet: %u bytes from peer %d", (unsigned)plain_len, idx);
+    if (pkt[0] == WG_MSG_TRANSPORT && plain_len) {
+        // A real IP packet from the tailnet. Hand it to the stack, which
+        // will answer pings and serve the status page over the tunnel.
+        tun_input(plain, plain_len);
+    }
+}
+
+// The outbound half of the tunnel: lwIP hands us a packet for a tailnet
+// address and we find the peer it belongs to.
+//
+// Called on the lwIP thread, so it must not do anything slow. Transport
+// encryption is only ChaCha20; the expensive X25519 work lives in the
+// handshake path on the other task.
+static int tun_send_cb(const uint8_t *ip_packet, size_t len, uint32_t dst_be) {
+    tun_tx tx;
+
+    if (!s_txq || len == 0 || len > 1500) return -1;
+    tx.data = malloc(len);
+    if (!tx.data) return -1;
+    memcpy(tx.data, ip_packet, len);
+    tx.len = (uint16_t)len;
+    tx.dst_be = dst_be;
+
+    // Never block the network stack: if the queue is full the packet is
+    // dropped, which is what a congested link does anyway.
+    if (xQueueSend(s_txq, &tx, 0) != pdTRUE) {
+        free(tx.data);
+        return -1;
+    }
+    return 0;
+}
+
+// Encrypts and sends whatever lwIP queued. Runs on the receive task, where
+// both the lock and the socket API are safe to use.
+static void drain_tun_queue(void) {
+    tun_tx tx;
+    static uint8_t out[1600];
+
+    while (s_txq && xQueueReceive(s_txq, &tx, 0) == pdTRUE) {
+        size_t out_len = 0;
+        int i, n;
+
+        LOCK();
+        n = peers_count();
+        for (i = 0; i < n; i++) {
+            peer_entry *e = peers_at(i);
+            const ts_path *best;
+            uint8_t v4[4];
+            struct sockaddr_in dst;
+
+            if (!e || e->tailnet_ip_be != tx.dst_be) continue;
+            if (e->wg_index < 0 || !wg_is_established(s_wg, e->wg_index)) break;
+            best = ts_path_best(s_eng, e->path_index);
+            if (!best || !disco_is_ipv4_mapped(best->ip, v4)) break;
+            if (wg_encrypt(s_wg, e->wg_index, tx.data, tx.len,
+                           out, sizeof(out), &out_len) != 0) break;
+
+            memset(&dst, 0, sizeof(dst));
+            dst.sin_family = AF_INET;
+            dst.sin_port = htons(best->port);
+            memcpy(&dst.sin_addr, v4, 4);
+            UNLOCK();
+            sendto(s_sock, out, out_len, 0, (struct sockaddr *)&dst, sizeof(dst));
+            LOCK();
+            break;
+        }
+        UNLOCK();
+        free(tx.data);
+    }
 }
 
 // Starts a handshake with any peer that has a working path but no session.
+// At most one per call: X25519 takes about 180 ms on this chip and the lock
+// is held throughout, so doing four in a row would stall the network stack.
 static void wg_maintain(void) {
     int i, n = peers_count();
 
@@ -307,8 +392,11 @@ static void wg_maintain(void) {
         sendto(s_sock, init, sizeof(init), 0, (struct sockaddr *)&dst, sizeof(dst));
         ESP_LOGI(TAG, "handshake -> %s (%u.%u.%u.%u:%u)",
                  e->name, v4[0], v4[1], v4[2], v4[3], best->port);
+        return;                 // one per tick
     }
 }
+
+tun_send_fn magic_tun_sender(void) { return tun_send_cb; }
 
 int magic_tunnels_up(void) {
     int i, n = peers_count(), up = 0;
@@ -385,6 +473,8 @@ static void magic_task(void *arg) {
         if (now - last_wg > 1000) { last_wg = now; wg_maintain(); }
         UNLOCK();
 
+        drain_tun_queue();
+
         // Without this the probing is completely silent and a run that finds
         // nothing looks the same as a run that never tried.
         if (now - last_report > 15000) {
@@ -407,7 +497,8 @@ int magic_start(const uint8_t disco_priv[32], const uint8_t node_pub[32],
     s_eng = calloc(1, sizeof(*s_eng));
     if (!s_eng) return -1;
     s_lock = xSemaphoreCreateMutex();
-    if (!s_lock) { free(s_eng); s_eng = NULL; return -1; }
+    s_txq = xQueueCreate(12, sizeof(tun_tx));
+    if (!s_lock || !s_txq) { free(s_eng); s_eng = NULL; return -1; }
 
     s_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (s_sock < 0) { free(s_eng); s_eng = NULL; return -1; }

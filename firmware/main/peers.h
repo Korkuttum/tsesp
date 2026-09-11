@@ -21,6 +21,7 @@ typedef struct {
     // name is stored whole rather than quietly clipped.
     char     name[TS_NAME_STR];
     char     addr[TS_ADDR_STR];        // the peer's 100.x address
+    uint32_t tailnet_ip_be;            // the same, parsed, for routing
     uint8_t  disco_key[32];
     bool     has_disco;
     uint8_t  node_key[32];      // WireGuard's static key for this peer

@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include "lwip/inet.h"
 #include "peers.h"
 
 static peer_entry s_peers[PEERS_MAX];
@@ -53,7 +54,18 @@ peer_entry *peers_upsert(const ts_peer *p) {
     // arrives with empty endpoints, and treating that as "no endpoints" would
     // delete the addresses we need to reach this peer.
     if (p->name[0])       snprintf(e->name, sizeof(e->name), "%s", p->name);
-    if (p->naddrs)        snprintf(e->addr, sizeof(e->addr), "%s", p->addrs[0]);
+    if (p->naddrs) {
+        snprintf(e->addr, sizeof(e->addr), "%s", p->addrs[0]);
+        // "100.65.96.112/32" -> the address alone, for routing decisions.
+        {
+            unsigned a, b, c, d;
+            if (sscanf(e->addr, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+                a < 256 && b < 256 && c < 256 && d < 256)
+                e->tailnet_ip_be = PP_HTONL(0) |
+                    ((uint32_t)a) | ((uint32_t)b << 8) |
+                    ((uint32_t)c << 16) | ((uint32_t)d << 24);
+        }
+    }
     if (p->has_disco_key) { memcpy(e->disco_key, p->disco_key, 32); e->has_disco = true; }
     if (p->has_node_key)  { memcpy(e->node_key, p->node_key, 32); e->has_node_key = true; }
     if (p->home_derp)     e->home_derp = p->home_derp;

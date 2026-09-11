@@ -28,6 +28,7 @@
 #include "peers.h"
 #include "magic.h"
 #include "derp_task.h"
+#include "tun.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
@@ -131,6 +132,17 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
 
     // Only a message that restates our own record says anything about this;
     // an incremental update carries peers only.
+    // Our own tailnet address arrives with the netmap, and the interface
+    // cannot exist before we know it.
+    if (info->self_naddrs && !tun_is_up()) {
+        unsigned a, b, c, d;
+        if (sscanf(info->self_addrs[0], "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            uint32_t ip = (uint32_t)a | ((uint32_t)b << 8) |
+                          ((uint32_t)c << 16) | ((uint32_t)d << 24);
+            tun_start(ip, magic_tun_sender());
+        }
+    }
+
     if (info->self_naddrs) {
         int i;
         for (i = 0; i < info->self_nendpoints; i++)

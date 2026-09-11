@@ -8,6 +8,7 @@
 #include "ts_path.h"
 #include "peers.h"
 #include "wireguard.h"
+#include "tun.h"
 
 #define MAGIC_PORT 41641
 
@@ -31,6 +32,8 @@ void magic_handle_relayed(const uint8_t src_node_pub[32],
 
 // How many peers have a live WireGuard session.
 int  magic_tunnels_up(void);
+// The callback lwIP uses to send into the tunnel.
+tun_send_fn magic_tun_sender(void);
 int  magic_paths_up(void);
 const ts_path *magic_best_for(const peer_entry *p);
 void magic_stats(uint32_t *pings, uint32_t *pongs);
