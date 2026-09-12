@@ -16,3 +16,6 @@ dependencies.lock
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
+
+# macOS folder metadata, not ours and not the project's
+.DS_Store
