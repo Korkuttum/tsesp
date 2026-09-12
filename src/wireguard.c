@@ -132,12 +132,21 @@ void wg_remove_peer(wg_device *d, int idx) {
 
 static uint32_t now(wg_device *d) { return d->now_ms ? d->now_ms(d->ctx) : 0; }
 
+// The previous-keypair slot: defined below, used by the handshake and the
+// data path above it.
+static int  prev_usable(wg_device *d, wg_peer *p);
+static void stash_current(wg_device *d, wg_peer *p);
+
 int wg_is_established(wg_device *d, int idx) {
     wg_peer *p;
     if (idx < 0 || idx >= WG_MAX_PEERS) return 0;
     p = &d->peers[idx];
-    if (!p->in_use || p->state != WG_HS_ESTABLISHED) return 0;
-    return (uint32_t)(now(d) - p->established_ms) < WG_REJECT_AFTER_MS;
+    if (!p->in_use) return 0;
+    if (p->state == WG_HS_ESTABLISHED &&
+        (uint32_t)(now(d) - p->established_ms) < WG_REJECT_AFTER_MS) return 1;
+    // A handshake being in flight is not the same as having no session: the
+    // keypair it is replacing still carries traffic until it ages out.
+    return prev_usable(d, p);
 }
 
 int wg_needs_handshake(wg_device *d, int idx) {
@@ -148,8 +157,17 @@ int wg_needs_handshake(wg_device *d, int idx) {
     if (!p->in_use) return 0;
     t = now(d);
 
-    if (p->state == WG_HS_INITIATION_SENT)
-        return (uint32_t)(t - p->handshake_started_ms) > WG_REKEY_TIMEOUT_MS;
+    if (p->state == WG_HS_INITIATION_SENT) {
+        // Doubling, capped. A peer that is switched off used to cost two
+        // X25519s - about 360 ms here - every five seconds for as long as it
+        // stayed off, which is most of a core spent on nobody.
+        uint32_t wait = WG_REKEY_TIMEOUT_MS;
+        uint32_t n = p->hs_attempts > 1 ? p->hs_attempts - 1 : 0;
+        if (n > 4) n = 4;
+        wait <<= n;
+        if (wait > WG_HANDSHAKE_MAX_MS) wait = WG_HANDSHAKE_MAX_MS;
+        return (uint32_t)(t - p->handshake_started_ms) > wait;
+    }
     if (p->state != WG_HS_ESTABLISHED) return 1;
     // Only the side that started the last handshake rekeys, so both do not
     // fire at once.
@@ -167,6 +185,10 @@ int wg_create_initiation(wg_device *d, int idx, uint8_t *out) {
     if (idx < 0 || idx >= WG_MAX_PEERS) return -1;
     p = &d->peers[idx];
     if (!p->in_use) return -1;
+
+    // Everything below overwrites the session that may still be carrying
+    // traffic, so put it somewhere the data path can still reach it.
+    stash_current(d, p);
 
     initial_state(p->ck, p->h);
     mix_hash(p->h, p->remote_static, 32);
@@ -212,6 +234,7 @@ int wg_create_initiation(wg_device *d, int idx, uint8_t *out) {
 
     p->state = WG_HS_INITIATION_SENT;
     p->handshake_started_ms = now(d);
+    p->hs_attempts++;
     memset(dh, 0, sizeof(dh));
     memset(key, 0, sizeof(key));
     return 0;
@@ -234,6 +257,7 @@ static void begin_session(wg_device *d, wg_peer *p, int initiator) {
     p->initiator = initiator;
     p->state = WG_HS_ESTABLISHED;
     p->established_ms = now(d);
+    p->hs_attempts = 0;
     memset(out, 0, sizeof(out));
     memset(p->ck, 0, 32);
     memset(p->eph_priv, 0, 32);
@@ -328,6 +352,9 @@ static int consume_initiation(wg_device *d, const uint8_t *msg, size_t len,
     d->random(d->ctx, eph_priv, 32);
     x25519_clamp(eph_priv);
     x25519_base(eph_pub, eph_priv);
+    // The peer is rekeying. Its packets already in flight under the old keys
+    // are still on their way, so keep that keypair before taking a new index.
+    stash_current(d, p);
     d->random(d->ctx, (uint8_t *)&p->local_index, 4);
     p->remote_index = get32le(msg + 4);
 
@@ -379,42 +406,88 @@ static void counter_nonce(uint8_t nonce[12], uint64_t counter) {
 
 // A 64-packet sliding window: enough for the reordering a WiFi link causes,
 // and it is what stops a replayed packet from being accepted twice.
-static int window_check_and_set(wg_peer *p, uint64_t counter) {
-    if (counter > p->recv_highest) {
-        uint64_t shift = counter - p->recv_highest;
-        p->recv_window = shift >= 64 ? 0 : (p->recv_window << shift);
-        p->recv_window |= 1;
-        p->recv_highest = counter;
+static int window_check_and_set(uint64_t *highest, uint64_t *window,
+                                uint64_t counter) {
+    if (counter > *highest) {
+        uint64_t shift = counter - *highest;
+        *window = shift >= 64 ? 0 : (*window << shift);
+        *window |= 1;
+        *highest = counter;
         return 0;
     }
     {
-        uint64_t back = p->recv_highest - counter;
+        uint64_t back = *highest - counter;
         if (back >= 64) return -1;                 // too old
-        if (p->recv_window & (1ULL << back)) return -1;   // already seen
-        p->recv_window |= (1ULL << back);
+        if (*window & (1ULL << back)) return -1;   // already seen
+        *window |= (1ULL << back);
         return 0;
     }
+}
+
+// True while the keypair a rekey replaced can still be used. Expiring it here
+// is also where its key material gets wiped.
+static int prev_usable(wg_device *d, wg_peer *p) {
+    if (!p->prev.valid) return 0;
+    if ((uint32_t)(now(d) - p->prev.established_ms) < WG_REJECT_AFTER_MS) return 1;
+    memset(&p->prev, 0, sizeof(p->prev));
+    return 0;
+}
+
+// Sets the live session aside before a handshake overwrites it, so traffic
+// keeps flowing while the new one is negotiated.
+static void stash_current(wg_device *d, wg_peer *p) {
+    if (p->state != WG_HS_ESTABLISHED) return;
+    if ((uint32_t)(now(d) - p->established_ms) >= WG_REJECT_AFTER_MS) return;
+    memcpy(p->prev.send_key, p->send_key, 32);
+    memcpy(p->prev.recv_key, p->recv_key, 32);
+    p->prev.send_counter   = p->send_counter;
+    p->prev.recv_highest   = p->recv_highest;
+    p->prev.recv_window    = p->recv_window;
+    p->prev.local_index    = p->local_index;
+    p->prev.remote_index   = p->remote_index;
+    p->prev.established_ms = p->established_ms;
+    p->prev.valid          = 1;
 }
 
 int wg_encrypt(wg_device *d, int idx, const uint8_t *plain, size_t len,
                uint8_t *out, size_t out_cap, size_t *out_len) {
     wg_peer *p;
     uint8_t nonce[12];
+    const uint8_t *key;
+    uint64_t *send_counter;
+    uint32_t remote;
 
-    if (!wg_is_established(d, idx)) return -1;
+    if (idx < 0 || idx >= WG_MAX_PEERS) return -1;
     p = &d->peers[idx];
+    if (!p->in_use) return -1;
     if (len > WG_MAX_PACKET) return -1;
     if (out_cap < WG_TRANSPORT_HEADER + len + WG_TAG_LEN) return -1;
 
+    if (p->state == WG_HS_ESTABLISHED &&
+        (uint32_t)(now(d) - p->established_ms) < WG_REJECT_AFTER_MS) {
+        key = p->send_key;
+        send_counter = &p->send_counter;
+        remote = p->remote_index;
+    } else if (prev_usable(d, p)) {
+        // A handshake is in flight and the keys it will replace are still
+        // good. Refusing here would stop the tunnel for a round trip every
+        // two minutes, and for good if the handshake went missing.
+        key = p->prev.send_key;
+        send_counter = &p->prev.send_counter;
+        remote = p->prev.remote_index;
+    } else {
+        return -1;
+    }
+
     out[0] = WG_MSG_TRANSPORT;
     out[1] = out[2] = out[3] = 0;
-    put32le(out + 4, p->remote_index);
-    put64le(out + 8, p->send_counter);
+    put32le(out + 4, remote);
+    put64le(out + 8, *send_counter);
 
-    counter_nonce(nonce, p->send_counter);
-    chacha20poly1305_seal(out + WG_TRANSPORT_HEADER, p->send_key, nonce,
+    counter_nonce(nonce, *send_counter);
+    chacha20poly1305_seal(out + WG_TRANSPORT_HEADER, key, nonce,
                           plain, len, NULL, 0);
-    p->send_counter++;
+    (*send_counter)++;
     p->tx_packets++;
     p->last_send_ms = now(d);
     *out_len = WG_TRANSPORT_HEADER + len + WG_TAG_LEN;
@@ -430,27 +503,44 @@ static int consume_transport(wg_device *d, const uint8_t *msg, size_t len,
     uint32_t receiver;
     uint64_t counter;
     uint8_t nonce[12];
+    size_t ctlen;
     int i;
 
     if (len < WG_TRANSPORT_HEADER + WG_TAG_LEN) return -1;
     receiver = get32le(msg + 4);
     counter = get64le(msg + 8);
+    ctlen = len - WG_TRANSPORT_HEADER;
+    if (ctlen - WG_TAG_LEN > plain_cap) return -1;
+    counter_nonce(nonce, counter);
 
     for (i = 0; i < WG_MAX_PEERS; i++) {
         wg_peer *p = &d->peers[i];
-        size_t ctlen = len - WG_TRANSPORT_HEADER;
-        if (!p->in_use || p->state != WG_HS_ESTABLISHED) continue;
-        if (p->local_index != receiver) continue;
-        if ((uint32_t)(now(d) - p->established_ms) > WG_REJECT_AFTER_MS) return -1;
-        if (ctlen - WG_TAG_LEN > plain_cap) return -1;
+        const uint8_t *key = NULL;
+        uint64_t *highest = NULL, *window = NULL;
 
-        counter_nonce(nonce, counter);
-        if (chacha20poly1305_open(plain, p->recv_key, nonce,
+        if (!p->in_use) continue;
+
+        if (p->state == WG_HS_ESTABLISHED && p->local_index == receiver &&
+            (uint32_t)(now(d) - p->established_ms) <= WG_REJECT_AFTER_MS) {
+            key = p->recv_key;
+            highest = &p->recv_highest;
+            window = &p->recv_window;
+        } else if (prev_usable(d, p) && p->prev.local_index == receiver) {
+            // Sent under the keypair a rekey replaced. Dropping these is what
+            // made every rekey look like a burst of packet loss.
+            key = p->prev.recv_key;
+            highest = &p->prev.recv_highest;
+            window = &p->prev.recv_window;
+        } else {
+            continue;
+        }
+
+        if (chacha20poly1305_open(plain, key, nonce,
                                   msg + WG_TRANSPORT_HEADER, ctlen, NULL, 0) != 0)
             return -2;
         // Only after the tag verifies: an attacker must not be able to poke
         // holes in the replay window with forged packets.
-        if (window_check_and_set(p, counter) != 0) return -4;
+        if (window_check_and_set(highest, window, counter) != 0) return -4;
 
         *plain_len = ctlen - WG_TAG_LEN;
         p->rx_packets++;

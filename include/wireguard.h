@@ -39,6 +39,10 @@
 #define WG_REJECT_AFTER_MS  180000
 #define WG_REKEY_TIMEOUT_MS   5000
 #define WG_KEEPALIVE_MS      10000
+// Ceiling on the handshake retry backoff. Each attempt costs two X25519s,
+// about 360 ms on this chip, so a peer that is switched off must not be
+// retried every five seconds for as long as it stays off.
+#define WG_HANDSHAKE_MAX_MS  60000
 
 typedef enum {
     WG_HS_NONE = 0,
@@ -46,6 +50,23 @@ typedef enum {
     WG_HS_INITIATION_RECEIVED,
     WG_HS_ESTABLISHED
 } wg_hs_state;
+
+// The keypair a rekey is replacing.
+//
+// WireGuard keeps one generation back on purpose. Without it a rekey
+// black-holes the tunnel in both directions for a round trip - inbound
+// packets carry an index that no longer exists, outbound has no key to use -
+// and if the rekey is never answered the session dies although the old keys
+// were good for another sixty seconds (REKEY_AFTER is 120 s, REJECT_AFTER
+// is 180 s; that gap exists for exactly this).
+typedef struct {
+    uint8_t  send_key[32], recv_key[32];
+    uint64_t send_counter;
+    uint64_t recv_highest, recv_window;
+    uint32_t local_index, remote_index;
+    uint32_t established_ms;
+    int      valid;
+} wg_keypair;
 
 typedef struct {
     uint8_t  remote_static[32];
@@ -66,6 +87,13 @@ typedef struct {
     uint64_t recv_window;           // bitmap of the 64 below recv_highest
     uint32_t established_ms;
     int      initiator;
+
+    // Still usable while the next handshake is in flight.
+    wg_keypair prev;
+
+    // Initiations sent since the last completed handshake, so retries can
+    // back off instead of repeating at a fixed five seconds forever.
+    uint32_t hs_attempts;
 
     uint32_t tx_packets, rx_packets;
     uint32_t last_send_ms, last_recv_ms;

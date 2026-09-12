@@ -151,6 +151,85 @@ int main(void) {
         ok(!wg_is_established(&A, ia), "an old session stops being usable");
     }
 
+    printf("a rekey does not interrupt the session it replaces\n");
+    {
+        // Fresh pair: the clock above has already aged A and B out.
+        static wg_device P, Q;
+        uint8_t p_priv[32], q_priv[32];
+        uint8_t pi[WG_INITIATION_SIZE], pr[WG_RESPONSE_SIZE], data[256];
+        size_t rl = 0, dl = 0;
+        int ip, iq;
+
+        rng_cb(NULL, p_priv, 32); x25519_clamp(p_priv);
+        rng_cb(NULL, q_priv, 32); x25519_clamp(q_priv);
+        wg_device_init(&P, p_priv); wire(&P);
+        wg_device_init(&Q, q_priv); wire(&Q);
+        ip = wg_add_peer(&P, Q.static_pub);
+        iq = wg_add_peer(&Q, P.static_pub);
+
+        wg_create_initiation(&P, ip, pi);
+        wg_handle(&Q, pi, sizeof(pi), plain, sizeof(plain), &plain_len,
+                  pr, sizeof(pr), &rl);
+        wg_handle(&P, pr, rl, plain, sizeof(plain), &plain_len, NULL, 0, NULL);
+        ok(wg_is_established(&P, ip) && wg_is_established(&Q, iq), "session up");
+
+        // Two minutes on, P starts a rekey. Q knows nothing about it and its
+        // packet is already on the wire, encrypted with the keys P is about
+        // to replace.
+        clock_ms += WG_REKEY_AFTER_MS + 1000;
+        wg_encrypt(&Q, iq, (const uint8_t *)"in flight", 9, data, sizeof(data), &dl);
+        wg_create_initiation(&P, ip, pi);
+
+        ok(wg_handle(&P, data, dl, plain, sizeof(plain), &plain_len,
+                     pr, sizeof(pr), &rl) == ip,
+           "a packet under the replaced keys still decrypts");
+        ok(wg_encrypt(&P, ip, (const uint8_t *)"x", 1, data, sizeof(data), &dl) == 0,
+           "and those keys still carry traffic outbound");
+        ok(wg_is_established(&P, ip), "so the tunnel is not reported down");
+
+        // Not immortal: the replaced keypair ages out on its own schedule.
+        clock_ms += WG_REJECT_AFTER_MS;
+        ok(!wg_is_established(&P, ip), "the replaced keypair does age out");
+    }
+
+    printf("handshake retries back off\n");
+    {
+        static wg_device R;
+        uint8_t r_priv[32], far_priv[32], far_pub[32];
+        uint8_t ri[WG_INITIATION_SIZE];
+        uint32_t t0;
+        int ir, i;
+
+        rng_cb(NULL, r_priv, 32); x25519_clamp(r_priv);
+        rng_cb(NULL, far_priv, 32); x25519_clamp(far_priv);
+        x25519_base(far_pub, far_priv);
+        wg_device_init(&R, r_priv); wire(&R);
+        ir = wg_add_peer(&R, far_pub);        // switched off; never answers
+
+        wg_create_initiation(&R, ir, ri);
+        t0 = clock_ms;
+        clock_ms = t0 + WG_REKEY_TIMEOUT_MS + 1;
+        ok(wg_needs_handshake(&R, ir), "the first retry comes after five seconds");
+
+        wg_create_initiation(&R, ir, ri);
+        t0 = clock_ms;
+        clock_ms = t0 + WG_REKEY_TIMEOUT_MS + 1;
+        ok(!wg_needs_handshake(&R, ir), "the second does not come that fast");
+        clock_ms = t0 + 2 * WG_REKEY_TIMEOUT_MS + 1;
+        ok(wg_needs_handshake(&R, ir), "it comes at twice the wait");
+
+        for (i = 0; i < 8; i++) {
+            wg_create_initiation(&R, ir, ri);
+            clock_ms += WG_HANDSHAKE_MAX_MS + 1;
+        }
+        wg_create_initiation(&R, ir, ri);
+        t0 = clock_ms;
+        clock_ms = t0 + WG_HANDSHAKE_MAX_MS - 1000;
+        ok(!wg_needs_handshake(&R, ir), "a peer off for a long time waits a minute");
+        clock_ms = t0 + WG_HANDSHAKE_MAX_MS + 1000;
+        ok(wg_needs_handshake(&R, ir), "and never longer than that");
+    }
+
     printf("strangers\n");
     {
         static wg_device C;

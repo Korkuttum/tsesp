@@ -106,6 +106,34 @@ kalır, çünkü bağlıyken yeniden tarama yapmıyor. İki testte de olmadı (z
 node adres vermedi), o yüzden "sinyal kötüyse daha iyisini ara" davranışı
 yazılmadı.
 
+### WireGuard: rekey tüneli kesiyordu
+
+Kart günlüğünde `wireguard type 4 ... rejected (-1)` satırları göze çarptı.
+Bir kısmı zararsız — her yeniden başlatmadan sonra peer'lar bir süre artık var
+olmayan bir oturuma paket yollar, bunu her implementasyon düşürür. Ama
+reddetmeler tam peer'ların handshake başlattığı saniyelerde kümeleniyordu.
+
+Sebep: peer başına **tek anahtar yuvası** vardı. Hem `wg_create_initiation`
+hem `consume_initiation`, hâlâ trafik taşıyan oturumun `local_index` ve
+`state` alanlarının üstüne yazıyordu. Sonuç, rekey başladığı andan cevap
+gelene kadar tünelin çift yönlü kapanması — gelen paket eşleşmiyor, giden
+`wg_encrypt` de reddediyor. Rekey cevapsız kalırsa oturum tamamen ölüyordu,
+oysa spec eski anahtarlara 60 saniye daha tanıyor (`REKEY_AFTER` 120 sn,
+`REJECT_AFTER` 180 sn; o aralık tam bunun için var).
+
+Gerçek WireGuard bir kuşak geriyi saklar. Artık burada da `wg_keypair prev`
+var: `consume_transport` önce güncel anahtara, tutmazsa öncekine bakıyor;
+`wg_encrypt` rekey uçuştayken eski anahtarla göndermeye devam ediyor.
+Maliyet `wg_device` için +896 bayt.
+
+İkinci bulgu: kapalı bir peer'a handshake denemesi 5 saniyede bir, sonsuza
+kadar tekrarlıyordu. Her deneme iki X25519, bu kartta ~360 ms. Artık ikiye
+katlanan, 60 saniyede sınırlanan bir bekleme var.
+
+Testler eski kodda düşüyor, yenisinde geçiyor (`./build/wireguard_test`).
+Kartta ölçülen: ilk 40 saniyeden sonra 5 peer-handshake, sıfır reddetme;
+kapalı peer'a denemeler 5.6 → 11.3 → 20.8 sn aralıklarla seyreldi.
+
 ## Neden PSRAM'siz çalışabiliyor
 
 İki karar bütün farkı yaratıyor:
