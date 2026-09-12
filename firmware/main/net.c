@@ -1,10 +1,12 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "lwip/inet.h"
 #include "net.h"
 #include "device_nvs.h"
@@ -14,22 +16,58 @@ static const char *TAG = "net";
 #define BIT_CONNECTED BIT0
 #define BIT_FAILED    BIT1
 // Enough attempts to ride out a slow router, few enough that a wrong password
-// does not leave the user staring at nothing.
+// does not leave the user staring at nothing. This budget covers the *first*
+// join only: once a network has worked, giving up on it is never the right
+// answer, because the usual reason it went away is that someone rebooted the
+// modem and it is coming back.
 #define MAX_STA_RETRY 5
+// A modem that was just power-cycled needs tens of seconds before it serves
+// DHCP again, so retries start quick and back off to a period that can wait
+// out a genuinely absent network without keeping the radio busy.
+#define RECONNECT_MIN_MS 2000
+#define RECONNECT_MAX_MS 30000
+// Associated to the access point and still without an address this long
+// after: the exchange is not going to finish on its own, and nothing will
+// fire an event to say so.
+#define DHCP_GRACE_MS 20000
 
 static EventGroupHandle_t s_events;
 static int      s_retries;
 static bool     s_connected;
+static bool     s_sta_configured;   // credentials are loaded; connecting means something
+static bool     s_joined_once;      // this network has worked at least once
+static uint32_t s_down_since_ms;
+static uint32_t s_last_try_ms;
+static uint32_t s_backoff_ms = RECONNECT_MIN_MS;
+static uint32_t s_reconnects;
+static uint32_t s_last_ip;          // network order, as the event delivers it
+static bool     s_ip_changed;
+static void   (*s_ip_cb)(void);
 static char     s_ip[16] = "0.0.0.0";
 static char     s_ap_ssid[24];
+
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // While the setup portal is up the station exists only so the page can
+        // scan for networks. There is nothing to connect to, and trying anyway
+        // leaves the radio in a connect loop that makes those scans fail.
+        if (s_sta_configured) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        s_connected = false;
+        if (s_connected) {
+            s_connected = false;
+            s_down_since_ms = now_ms();
+            s_last_try_ms = now_ms();
+            s_backoff_ms = RECONNECT_MIN_MS;
+            ESP_LOGW(TAG, "wifi link lost");
+        }
         strcpy(s_ip, "0.0.0.0");
+        if (!s_sta_configured) return;
+        // Past the first join, link_task owns the retries: it can wait
+        // between attempts, and the event handler cannot.
+        if (s_joined_once) return;
         if (s_retries < MAX_STA_RETRY) {
             s_retries++;
             ESP_LOGW(TAG, "reconnecting (%d/%d)", s_retries, MAX_STA_RETRY);
@@ -40,10 +78,75 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
+        if (e->ip_info.ip.addr != s_last_ip) {
+            s_last_ip = e->ip_info.ip.addr;
+            s_ip_changed = true;
+        }
         s_retries = 0;
+        s_backoff_ms = RECONNECT_MIN_MS;
         s_connected = true;
-        ESP_LOGI(TAG, "connected, ip %s", s_ip);
+        s_joined_once = true;
+        {
+            // Which access point, not just which network. With a mesh the
+            // difference between two nodes of the same SSID is the difference
+            // between -46 and -80 dBm, and without this in the log there is
+            // no way to tell afterwards which one it settled on.
+            wifi_ap_record_t ap;
+            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+                ESP_LOGI(TAG, "connected, ip %s via %02x:%02x:%02x:%02x:%02x:%02x "
+                              "ch %d, rssi %d", s_ip,
+                         ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                         ap.bssid[3], ap.bssid[4], ap.bssid[5],
+                         ap.primary, ap.rssi);
+            else
+                ESP_LOGI(TAG, "connected, ip %s", s_ip);
+        }
         xEventGroupSetBits(s_events, BIT_CONNECTED);
+    }
+}
+
+// Keeps the station on its network for as long as the device is running.
+//
+// This lives in a task rather than in the event handler because the useful
+// thing to do about a network that is not back yet is to wait, and the event
+// loop is the wrong place to wait. It also covers the failure no event
+// reports: associated to the access point, but no address ever arrives.
+static void link_task(void *arg) {
+    (void)arg;
+
+    for (;;) {
+        uint32_t down_ms;
+        wifi_ap_record_t ap;
+        esp_err_t err;
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_ip_changed && s_ip_cb) {
+            s_ip_changed = false;
+            s_ip_cb();
+        }
+        if (s_connected || !s_joined_once) continue;
+        if ((uint32_t)(now_ms() - s_last_try_ms) < s_backoff_ms) continue;
+        s_last_try_ms = now_ms();
+        down_ms = now_ms() - s_down_since_ms;
+
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && down_ms > DHCP_GRACE_MS) {
+            ESP_LOGW(TAG, "associated for %us with no address; starting the join over",
+                     (unsigned)(down_ms / 1000));
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        err = esp_wifi_connect();
+        s_reconnects++;
+        ESP_LOGW(TAG, "wifi down %us; reconnect attempt %u (err %d), next in %us",
+                 (unsigned)(down_ms / 1000), (unsigned)s_reconnects, (int)err,
+                 (unsigned)(s_backoff_ms / 1000));
+
+        if (s_backoff_ms < RECONNECT_MAX_MS) {
+            s_backoff_ms *= 2;
+            if (s_backoff_ms > RECONNECT_MAX_MS) s_backoff_ms = RECONNECT_MAX_MS;
+        }
     }
 }
 
@@ -98,8 +201,18 @@ bool net_start(void) {
         wifi_config_t cfg = {0};
         strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
         strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password));
+        // The default is a fast scan, which stops at the first access point
+        // answering to this SSID and joins that one whatever its signal. In a
+        // house with a mesh that is a coin flip, and it comes up tails exactly
+        // when the modem is rebooting: the node that never lost power answers
+        // first, so the device latches onto the far one at -80 dBm, cannot
+        // finish DHCP, and beacon-times-out in a loop. Scan every channel and
+        // take the strongest instead.
+        cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+        s_sta_configured = true;
         ESP_ERROR_CHECK(esp_wifi_start());
         // Power save has the access point hold packets until the station
         // next wakes, which shows up as latency spikes of a hundred
@@ -112,14 +225,26 @@ bool net_start(void) {
     {
         EventBits_t bits = xEventGroupWaitBits(s_events, BIT_CONNECTED | BIT_FAILED,
                                                pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
-        if (bits & BIT_CONNECTED) return true;
+        if (bits & BIT_CONNECTED) {
+            // Nothing below this point may assume the link stays up.
+            xTaskCreate(link_task, "link", 3072, NULL, 5, NULL);
+            return true;
+        }
         // Wrong password, or the network moved. Fall back to the portal
         // rather than rebooting into the same failure forever.
         ESP_LOGW(TAG, "could not join %s; opening setup portal", ssid);
+        s_sta_configured = false;
         esp_wifi_stop();
         start_ap();
         return false;
     }
+}
+
+void net_on_ip_change(void (*cb)(void)) {
+    // The caller applies the current address itself; only later changes are
+    // the callback's business.
+    s_ip_changed = false;
+    s_ip_cb = cb;
 }
 
 void net_get_wifi_info(char *ssid, size_t cap, int *rssi, int *channel) {
@@ -131,6 +256,11 @@ void net_get_wifi_info(char *ssid, size_t cap, int *rssi, int *channel) {
     if (ssid && cap) snprintf(ssid, cap, "%s", (const char *)ap.ssid);
     if (rssi) *rssi = ap.rssi;
     if (channel) *channel = ap.primary;
+}
+
+void net_get_link_stats(uint32_t *reconnects, uint32_t *down_s) {
+    if (reconnects) *reconnects = s_reconnects;
+    if (down_s) *down_s = s_connected ? 0 : (now_ms() - s_down_since_ms) / 1000;
 }
 
 bool net_is_connected(void) { return s_connected; }

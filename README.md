@@ -54,8 +54,57 @@ Kod tarafında bitmemiş bir şey yok; eksik olan **saha testi**:
 2. Bağlanacağın cihazda "subnet route'ları kullan"ı aç
 3. **Mobil veriden** (WiFi kapalı) ev ağındaki bir adrese eriş
 
-Doğrulanmamışlar: saatler/günler süren kararlılık, WiFi koptuğunda toparlanma,
-yük altında davranış. Hız beklentisi 1-3 Mbps.
+Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
+Hız beklentisi 1-3 Mbps.
+
+### Modem yeniden başlatma: iki hata
+
+"WiFi koptuğunda toparlanma" bu listedeydi ve sahada patladı — modem yeniden
+başlatılınca cihaz bir daha bağlanmıyordu. Altından iki ayrı hata çıktı, ve
+ikincisi ancak birincisi düzeltildikten sonra görünür oldu.
+
+**1. Yeniden bağlanma bütçesi.** 5 denemelik sayaç sadece `GOT_IP` ile
+sıfırlanıyordu ve tükenince `BIT_FAILED` set ediliyordu — ama o biti bekleyen
+tek yer `net_start()`, o da açılışta çoktan dönmüştü. Bit boşluğa düşüyor,
+`esp_wifi_connect()` bir daha hiç çağrılmıyordu. Beş deneme, modem daha
+açılmadan birkaç saniyede bitiyordu. Artık bütçe yalnızca *ilk* katılım için;
+sonrası sınırsız, 2 sn'den 30 sn'ye çıkan beklemeyle, kendi task'ında.
+
+**2. `WIFI_FAST_SCAN`.** `wifi_config_t cfg = {0}` yazınca `scan_method` sıfır
+kalıyor, o da fast scan demek: SSID eşleşen **ilk** AP'yi bulunca taramayı
+bırakıp ona bağlanıyor, sinyaline bakmadan. Evde mesh varsa bu yazı tura — ve
+tam modem yeniden başlarken tura geliyor, çünkü elektriği hiç kesilmeyen üst
+kat node'u ilk cevap veren oluyor. Cihaz -80 dBm'de ona kilitlenip DHCP'yi
+tamamlayamıyor, `bcn_timeout` yiyip aynı yere geri dönüyordu.
+`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL` ile bütün kanallar
+taranıp en güçlüsü seçiliyor.
+
+Üçüncü bir şey de düzeltildi ama sahada patlamamıştı: LAN'a bağlı her şey
+(ilan edilen rota, NAPT'ın yazdığı adres, "bu peer benim ağımda mı" testi)
+açılışta bir kez türetiliyordu. Modem farklı bir IP verirse hepsi bayatlıyor
+ve subnet routing log'da tek satır iz bırakmadan ölüyordu. Artık adres
+değişince yeniden türetiliyor.
+
+Sahada ölçülen (iki kez modem fişten çekildi, ~2 dk bekletildi):
+
+```
+kopma algılandı            beacon timeout'tan 2 sn sonra
+deneme aralığı             2, 4, 8, 16, 30, 30 sn ...  (sınır yok)
+modem kapalıyken           üst kat node'una 3 kez tutundu, -71..-78, adres yok
+modem dönünce              o turdaki taramada -48'lik modemi seçti
+tam toparlanma             kopmadan 97 sn sonra: ip, kontrol düzlemi,
+                           netmap, DERP, 4 WireGuard tüneli
+```
+
+97 saniyenin çoğu modemin kendi açılış süresi; cihaz modem geri geldikten
+sonraki ilk taramada bağlandı. Durum sayfasındaki "Kopma sayısı" bunu
+görünür kılıyor.
+
+Hâlâ doğrulanmamış bir senaryo var: zayıf node'dan DHCP adresi **alınabilirse**
+cihaz "bağlandım" deyip orada kalır ve modem dönse bile -80'lik hatta takılı
+kalır, çünkü bağlıyken yeniden tarama yapmıyor. İki testte de olmadı (zayıf
+node adres vermedi), o yüzden "sinyal kötüyse daha iyisini ara" davranışı
+yazılmadı.
 
 ## Neden PSRAM'siz çalışabiliyor
 

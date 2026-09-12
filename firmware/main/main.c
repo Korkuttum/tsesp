@@ -64,6 +64,7 @@ static uint32_t s_last_push_ms;
 static char s_local_ep[32];      // 192.168.x.y:41641
 static char s_route[24];         // the LAN we offer to route for
 static bool s_napt_on;
+static uint32_t s_napt_addr;     // the address NAPT currently rewrites to
 static char s_public_ep[52];     // what STUN told us, if anything
 
 static void log_request_body(const char *body, size_t len) {
@@ -417,6 +418,67 @@ static void control_task(void *arg) {
     }
 }
 
+// --------------------------------------------------------------- local net
+
+// Everything this device derives from the address its own router gave it.
+//
+// Called again whenever that address changes, which is what a modem reboot
+// can do: a stale route is advertised for a network that no longer exists,
+// and NAPT keeps rewriting to an address the interface no longer holds, so
+// subnet routing goes quiet with nothing in the log to say why.
+static void apply_lan_config(void) {
+    esp_netif_ip_info_t ip;
+    esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    uint32_t host_order, mask;
+    uint8_t v4[4], net[4];
+    char was[sizeof(s_route)];
+    int prefix = 0;
+
+    if (!nif || esp_netif_get_ip_info(nif, &ip) != ESP_OK || !ip.ip.addr) return;
+    if (s_napt_on && ip.ip.addr == s_napt_addr) return;     // same address, nothing to redo
+
+    host_order = ntohl(ip.ip.addr);
+    mask = ntohl(ip.netmask.addr);
+    v4[0] = (uint8_t)(host_order >> 24); v4[1] = (uint8_t)(host_order >> 16);
+    v4[2] = (uint8_t)(host_order >> 8);  v4[3] = (uint8_t)host_order;
+
+    // Read the prefix length off the interface rather than assuming
+    // /24. Plenty of routers hand out something else, and a wrong
+    // prefix means advertising a route that does not match the LAN.
+    while (prefix < 32 && (mask & (0x80000000u >> prefix))) prefix++;
+    if (prefix == 0 || prefix > 30) prefix = 24;   // nothing sane: fall back
+
+    ts_netmap_set_local_v4(v4, (uint8_t)prefix);
+
+    snprintf(was, sizeof(was), "%s", s_route);
+    {
+        uint32_t network = host_order & mask;
+        net[0] = (uint8_t)(network >> 24); net[1] = (uint8_t)(network >> 16);
+        net[2] = (uint8_t)(network >> 8);  net[3] = (uint8_t)network;
+        snprintf(s_route, sizeof(s_route), "%u.%u.%u.%u/%d",
+                 net[0], net[1], net[2], net[3], prefix);
+    }
+    ESP_LOGI(TAG, "local network %s (this device is %u.%u.%u.%u)",
+             s_route, v4[0], v4[1], v4[2], v4[3]);
+
+    // Masquerade forwarded packets as coming from this device, so a
+    // LAN machine that knows nothing about the tailnet still knows
+    // where to send its replies.
+    if (s_napt_on) ip_napt_enable(s_napt_addr, 0);
+    ip_napt_enable(ip.ip.addr, 1);
+    s_napt_addr = ip.ip.addr;
+    s_napt_on = true;
+    ESP_LOGI(TAG, "subnet routing ready for %s "
+                  "(approve the route in the admin console)", s_route);
+
+    // Peers were handed our old address and the old route. Neither is true
+    // any more, so say so now rather than at the next sixty-second tick.
+    if (was[0] && strcmp(was, s_route) != 0)
+        ESP_LOGW(TAG, "route changed: %s -> %s; re-approve it in the admin console",
+                 was, s_route);
+    s_push_wanted = true;
+}
+
 // -------------------------------------------------------------------- boot
 
 void app_main(void) {
@@ -466,46 +528,10 @@ void app_main(void) {
 
     // Scoring a peer's endpoints needs to know which network we are on: an
     // address on this same LAN is worth more than any public one. The route
-    // we offer comes from the same place.
-    {
-        esp_netif_ip_info_t ip;
-        esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK) {
-            uint32_t host_order = ntohl(ip.ip.addr);
-            uint32_t mask = ntohl(ip.netmask.addr);
-            uint8_t v4[4], net[4];
-            int prefix = 0;
-
-            v4[0] = (uint8_t)(host_order >> 24); v4[1] = (uint8_t)(host_order >> 16);
-            v4[2] = (uint8_t)(host_order >> 8);  v4[3] = (uint8_t)host_order;
-
-            // Read the prefix length off the interface rather than assuming
-            // /24. Plenty of routers hand out something else, and a wrong
-            // prefix means advertising a route that does not match the LAN.
-            while (prefix < 32 && (mask & (0x80000000u >> prefix))) prefix++;
-            if (prefix == 0 || prefix > 30) prefix = 24;   // nothing sane: fall back
-
-            ts_netmap_set_local_v4(v4, (uint8_t)prefix);
-
-            {
-                uint32_t network = host_order & mask;
-                net[0] = (uint8_t)(network >> 24); net[1] = (uint8_t)(network >> 16);
-                net[2] = (uint8_t)(network >> 8);  net[3] = (uint8_t)network;
-                snprintf(s_route, sizeof(s_route), "%u.%u.%u.%u/%d",
-                         net[0], net[1], net[2], net[3], prefix);
-            }
-            ESP_LOGI(TAG, "local network %s (this device is %u.%u.%u.%u)",
-                     s_route, v4[0], v4[1], v4[2], v4[3]);
-
-            // Masquerade forwarded packets as coming from this device, so a
-            // LAN machine that knows nothing about the tailnet still knows
-            // where to send its replies.
-            ip_napt_enable(ip.ip.addr, 1);
-            s_napt_on = true;
-            ESP_LOGI(TAG, "subnet routing ready for %s "
-                          "(approve the route in the admin console)", s_route);
-        }
-    }
+    // we offer comes from the same place. Both have to be re-derived if the
+    // router ever hands this device a different address.
+    apply_lan_config();
+    net_on_ip_change(apply_lan_config);
 
     ESP_ERROR_CHECK(device_keys_load(s_machine, s_node_priv, s_disco_priv));
     x25519_base(s_node_pub, s_node_priv);

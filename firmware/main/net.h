@@ -3,6 +3,8 @@
 #define NET_H
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 // Starts Wi-Fi. Tries the stored credentials; if there are none, or they do
@@ -11,6 +13,19 @@
 bool net_start(void);
 
 bool net_is_connected(void);
+
+// Called from the Wi-Fi task whenever the station comes up on an address it
+// did not have before. A modem that was rebooted can hand out a different
+// network, and the route this device advertises, the address NAPT rewrites
+// to, and the "is this peer on my LAN" test are all derived from it.
+// Registering clears any change already pending: the caller is expected to
+// apply the current address itself.
+void net_on_ip_change(void (*cb)(void));
+
+// How many times the link has been re-established since boot, and how long
+// it has been down right now. Zero reconnects after a week is the thing
+// worth seeing; a growing number points at the access point, not at us.
+void net_get_link_stats(uint32_t *reconnects, uint32_t *down_s);
 void net_get_ip(char *out, size_t cap);
 void net_get_ap_ssid(char *out, size_t cap);
 // Signal quality matters for a box sitting in a corner of a village house:

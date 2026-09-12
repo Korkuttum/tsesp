@@ -537,6 +537,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     char bare[48];
     const char *dot = "warn";
     int rssi = 0, channel = 0, bars, core0 = -1, core1 = -1;
+    uint32_t link_reconnects = 0;
     int i, n;
     uint32_t pings = 0, pongs = 0, tun_in = 0, tun_out = 0, derp_tx = 0, derp_rx = 0;
     esp_chip_info_t chip;
@@ -549,6 +550,9 @@ static esp_err_t get_status(httpd_req_t *req) {
 
     net_get_ip(ip, sizeof(ip));
     net_get_wifi_info(wifi_ssid, sizeof(wifi_ssid), &rssi, &channel);
+    // A device that quietly rode out a modem reboot looks identical to one
+    // that never lost the link. This is the difference.
+    net_get_link_stats(&link_reconnects, NULL);
     magic_stats(&pings, &pongs);
     tun_stats(&tun_in, &tun_out);
     derp_task_stats(&derp_tx, &derp_rx);
@@ -618,6 +622,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Bağlı olduğu ağ</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Sinyal</div><div class=v>%s%d<small> dBm, %s</small></div></div>"
         "<div class=cell><div class=k>Kanal</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>Kopma sayısı</div><div class=v>%u<small>"
+        " kez yeniden bağlandı</small></div></div>"
         "</div>"
         "<h2>Adresler</h2><p class=hint>&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.</p><div class=grid>"
         "%s%s%s</div>"
@@ -629,6 +635,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Röleden gelen</div><div class=v>%u</div></div>"
         "</div></div>",
         wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), channel,
+        (unsigned)link_reconnects,
         (copy_cell(c2, sizeof(c2), "Ev ağındaki adresi", ip), c2),
         (copy_cell(c3, sizeof(c3), "İnternetten görünen adres",
                    magic_get_public(pub, sizeof(pub)) ? pub : "henüz belirlenmedi"), c3),
