@@ -106,6 +106,36 @@ kalır, çünkü bağlıyken yeniden tarama yapmıyor. İki testte de olmadı (z
 node adres vermedi), o yüzden "sinyal kötüyse daha iyisini ara" davranışı
 yazılmadı.
 
+### Kurulum portalı artık bir çıkmaz sokak değil
+
+Açılışta kayıtlı ağa bağlanamayınca cihaz kurulum portalını açıyor ve
+`while (1)` ile orada kalıyordu — kayıtlı ağı bir daha hiç denemeden. Bu,
+modem yeniden başlatma hatasının açılış anındaki ikizi: elektrik kesintisinden
+sonra kart iki saniyede, modem bir dakikada açılır; kart ~15 saniyede pes edip
+portalı açar ve kendi ağı gelmesine rağmen orada oturur. Köy evinde kimse de
+reset atamaz.
+
+Artık portal açıkken kayıtlı ağ iki dakikada bir yeniden deneniyor: açılış
+yolunun kendisi zaten test edilmiş olduğu için deneme `esp_restart()` ile
+yapılıyor. İki koruma var — ilk beş dakika hiç denenmiyor (cihazı yeni
+taşımış biri kurulum ağına katılıp sayfayı açacak kadar süre bulsun), ve
+kurulum sayfası son beş dakikada açıldıysa erteleniyor (yeniden başlatmak,
+yarısı yazılmış parolayı siler). Kayıtlı ağ yoksa hiç denenmiyor.
+
+Cihazı kayıtlı ağın erişemeyeceği bir yere taşıdıysan deneme hiç tutmaz, ve
+maliyeti iki dakikada bir katılma denemesinden ibarettir.
+
+Kurulum ağının adı artık her açılışta log'a yazılıyor (`tsesp-xxxx`), sadece
+portal açıldığında değil: adı ihtiyaç duymadan önce bilmek bir yolculuk
+kurtarıyor.
+
+**Bu yol sahada çalıştırılmadı.** Kod yazılırken iki hatası çıktı ve ikisi de
+çıktıya bakılarak yakalandı (log satırı AP adı hesaplanmadan basılıyordu;
+boşta kalma süresi hiç açılmamış portal için yanlış hesaplanıyor, özelliği
+ilk beş dakika devre dışı bırakıyordu). Doğrulaması kolay: modemi kapat,
+kartı yeniden başlat, portalın açılmasını bekle, modemi aç — beş dakika
+içinde kendiliğinden dönmeli.
+
 ### WireGuard: rekey tüneli kesiyordu
 
 Kart günlüğünde `wireguard type 4 ... rejected (-1)` satırları göze çarptı.

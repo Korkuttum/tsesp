@@ -227,7 +227,26 @@ static const char CSS[] =
 
 // ------------------------------------------------------------- setup page
 
+// When the setup page was last touched. A phone joining the setup network
+// hits "/" by itself, so this answers "is someone standing here right now",
+// which is the one reason not to reboot and retry the stored network.
+static volatile uint32_t s_last_req_ms;
+
+static void mark_active(void) {
+    s_last_req_ms = (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+uint32_t portal_idle_ms(void) {
+    // Never opened means nobody is here, which has to read as idle however
+    // early it is. Returning the uptime instead would look like a visit that
+    // happened "uptime ago", and for the first few minutes after a power cut
+    // - the minutes that matter - that reads as somebody standing here.
+    if (!s_last_req_ms) return 0xffffffffu;
+    return (uint32_t)(esp_timer_get_time() / 1000) - s_last_req_ms;
+}
+
 static esp_err_t get_setup(httpd_req_t *req) {
+    mark_active();
     uint16_t n = 0;
     wifi_ap_record_t *aps = NULL;
     char *page = malloc(8192);
@@ -288,6 +307,7 @@ static esp_err_t get_setup(httpd_req_t *req) {
 }
 
 static esp_err_t post_save(httpd_req_t *req) {
+    mark_active();
     char body[256], ssid[WIFI_SSID_MAX], pass[WIFI_PASS_MAX];
     int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len
                                                        : (int)sizeof(body) - 1;
@@ -845,6 +865,7 @@ static esp_err_t post_rejoin(httpd_req_t *req) {
 }
 
 static esp_err_t post_forget(httpd_req_t *req) {
+    mark_active();
     device_wifi_erase();
     device_keys_erase();
     httpd_resp_sendstr(req, "silindi, yeniden başlıyor");

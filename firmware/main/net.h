@@ -50,4 +50,8 @@ typedef struct {
 
 void portal_set_status(const portal_status *s);
 
+// Milliseconds since the setup page was last requested. Large when nobody is
+// there, which is when the device is free to reboot and retry on its own.
+uint32_t portal_idle_ms(void);
+
 #endif

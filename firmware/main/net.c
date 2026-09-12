@@ -154,6 +154,9 @@ static void make_ap_ssid(void) {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "tsesp-%02x%02x", mac[4], mac[5]);
+    // Every boot, not only when the portal opens: knowing this name before
+    // you are standing somewhere with no network saves a trip.
+    ESP_LOGI(TAG, "setup network, if it is ever needed: %s", s_ap_ssid);
 }
 
 static void start_ap(void) {

@@ -46,6 +46,15 @@ static const char *TAG = "tsesp";
 // A streaming map session sits idle between updates; the server sends a
 // keep-alive well inside this.
 #define SOCKET_TIMEOUT_S 120
+// How often the setup portal gives the stored network another try, and how
+// recently someone must have loaded the page for that to be put off.
+#define PORTAL_RETRY_MS 120000
+#define PORTAL_BUSY_MS  300000
+// Nothing is retried during the first few minutes. Somebody who has just
+// carried the device somewhere new needs the setup network to sit still long
+// enough to join it and open the page; a power cut has nobody waiting, and
+// does not care whether it heals in two minutes or five.
+#define PORTAL_GRACE_MS 300000
 
 static uint8_t s_machine[32], s_node_priv[32], s_disco_priv[32];
 static uint8_t s_node_pub[32], s_disco_pub[32], s_control_pub[32];
@@ -498,14 +507,34 @@ void app_main(void) {
     }
 
     if (!net_start()) {
-        char ssid[24];
+        char ssid[24], p_ssid[WIFI_SSID_MAX], p_pass[WIFI_PASS_MAX];
         net_get_ap_ssid(ssid, sizeof(ssid));
         portal_start(true);
         ESP_LOGW(TAG, "");
         ESP_LOGW(TAG, "  ==> join wifi \"%s\" and the setup page should open", ssid);
         ESP_LOGW(TAG, "      or browse to http://192.168.4.1/");
         ESP_LOGW(TAG, "");
-        while (1) vTaskDelay(pdMS_TO_TICKS(10000));
+
+        // Not being able to join is not always permanent. After a power cut
+        // this board is running in two seconds and the router takes a minute,
+        // so the first attempt fails and the portal opens with nobody there to
+        // see it. Retry by rebooting into the same join the boot path already
+        // does, unless someone is at the setup page - a reboot would drop the
+        // password they are halfway through typing.
+        //
+        // With no network stored there is nothing to retry, and the portal is
+        // where the device belongs. Same when it has been carried somewhere
+        // the stored network cannot reach: the retry simply never succeeds,
+        // which costs one join attempt every two minutes and no more.
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(PORTAL_RETRY_MS));
+            if (now_ms() < PORTAL_GRACE_MS) continue;
+            if (!device_wifi_get(p_ssid, sizeof(p_ssid), p_pass, sizeof(p_pass)))
+                continue;
+            if (portal_idle_ms() < PORTAL_BUSY_MS) continue;
+            ESP_LOGW(TAG, "retrying %s; rebooting into the join", p_ssid);
+            esp_restart();
+        }
     }
 
     portal_start(false);
