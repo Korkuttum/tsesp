@@ -115,6 +115,16 @@ sonra kart iki saniyede, modem bir dakikada açılır; kart ~15 saniyede pes edi
 portalı açar ve kendi ağı gelmesine rağmen orada oturur. Köy evinde kimse de
 reset atamaz.
 
+Açılıştaki bırakma ölçüsü de değişti. "Beş deneme" yanlış birimdi — beş deneme
+saniyeler içinde tükeniyor, modemin açılma süresinden çok kısa. Artık ölçü
+zaman: **90 saniye**. Ama düz 90 saniye de iki ayrı durumu aynı sayıyor, ve
+ESP-IDF bunları zaten ayırt ediyor — `WIFI_REASON_NO_AP_FOUND` (ağ ortada yok,
+beklemeye değer, modem açılıyor olabilir) ile `AUTH_FAIL` / `HANDSHAKE_TIMEOUT`
+(parola tutmuyor, beklemek hiçbir şeyi değiştirmez). Kimlik doğrulama üst üste
+iki kez reddedilirse portal hemen açılıyor; başka her sebepte 90 saniye
+sabrediliyor. Sebep kodu artık log'a da basılıyor, ki "neden bağlanamıyor"
+sorusu bir dahakine tahminle değil tek satırla cevaplansın.
+
 Artık portal açıkken kayıtlı ağ iki dakikada bir yeniden deneniyor: açılış
 yolunun kendisi zaten test edilmiş olduğu için deneme `esp_restart()` ile
 yapılıyor. İki koruma var — ilk beş dakika hiç denenmiyor (cihazı yeni
@@ -129,7 +139,10 @@ Kurulum ağının adı artık her açılışta log'a yazılıyor (`tsesp-xxxx`),
 portal açıldığında değil: adı ihtiyaç duymadan önce bilmek bir yolculuk
 kurtarıyor.
 
-**Bu yol sahada çalıştırılmadı.** Kod yazılırken iki hatası çıktı ve ikisi de
+**Bu yolların hiçbiri sahada çalıştırılmadı** — bugün cihaz her açılışta
+bağlanabildi, yani ne 90 saniyelik bekleme, ne sebep koduna göre ayrım, ne de
+portaldan geri dönüş bir kez olsun tetiklendi. Normal açılışın bozulmadığı
+doğrulandı, o kadar. Kod yazılırken iki hatası çıktı ve ikisi de
 çıktıya bakılarak yakalandı (log satırı AP adı hesaplanmadan basılıyordu;
 boşta kalma süresi hiç açılmamış portal için yanlış hesaplanıyor, özelliği
 ilk beş dakika devre dışı bırakıyordu). Doğrulaması kolay: modemi kapat,

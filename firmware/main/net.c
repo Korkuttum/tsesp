@@ -15,12 +15,26 @@ static const char *TAG = "net";
 
 #define BIT_CONNECTED BIT0
 #define BIT_FAILED    BIT1
-// Enough attempts to ride out a slow router, few enough that a wrong password
-// does not leave the user staring at nothing. This budget covers the *first*
-// join only: once a network has worked, giving up on it is never the right
-// answer, because the usual reason it went away is that someone rebooted the
-// modem and it is coming back.
-#define MAX_STA_RETRY 5
+// How long the first join may take before the setup portal opens.
+//
+// A counted number of attempts was the wrong shape: five of them ran out in
+// seconds, well before a router that lost power with everything else finishes
+// booting, and the device opened the portal with nobody there to see it. Time
+// is what actually matters, and ninety seconds covers a router coming up.
+//
+// A wrong password does not wait this out - see auth_failure() below. This
+// budget covers the *first* join only: once a network has worked, giving up
+// on it is never the right answer.
+#define JOIN_WAIT_MS 90000
+// Two in a row, not one: a marginal link drops a four-way handshake now and
+// then, and one such event should not send a correctly configured device to
+// the setup portal.
+#define AUTH_FAILS_BEFORE_PORTAL 2
+// Backstop, not a budget. A scan that fails normally takes a second or two,
+// so the deadline above runs out long before this does; it exists because
+// retries are issued from the event handler, which cannot wait, and a failure
+// that returns instantly would spin there and starve everything else.
+#define JOIN_MAX_ATTEMPTS 60
 // A modem that was just power-cycled needs tens of seconds before it serves
 // DHCP again, so retries start quick and back off to a period that can wait
 // out a genuinely absent network without keeping the radio busy.
@@ -32,7 +46,8 @@ static const char *TAG = "net";
 #define DHCP_GRACE_MS 20000
 
 static EventGroupHandle_t s_events;
-static int      s_retries;
+static int      s_join_tries;
+static int      s_auth_fails;
 static bool     s_connected;
 static bool     s_sta_configured;   // credentials are loaded; connecting means something
 static bool     s_joined_once;      // this network has worked at least once
@@ -48,6 +63,16 @@ static char     s_ap_ssid[24];
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
+// The access point is there and will not let us in. Waiting changes nothing,
+// so the setup portal should open now rather than in a minute and a half.
+// WIFI_REASON_NO_AP_FOUND and its variants are the opposite case: nothing to
+// authenticate against yet, which is exactly what a booting router looks like.
+static bool auth_failure(uint8_t reason) {
+    return reason == WIFI_REASON_AUTH_FAIL ||
+           reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+           reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -56,25 +81,44 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         // leaves the radio in a connect loop that makes those scans fail.
         if (s_sta_configured) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
+        uint8_t reason = e ? e->reason : 0;
+
         if (s_connected) {
             s_connected = false;
             s_down_since_ms = now_ms();
             s_last_try_ms = now_ms();
             s_backoff_ms = RECONNECT_MIN_MS;
-            ESP_LOGW(TAG, "wifi link lost");
+            ESP_LOGW(TAG, "wifi link lost (reason %u)", reason);
         }
         strcpy(s_ip, "0.0.0.0");
         if (!s_sta_configured) return;
         // Past the first join, link_task owns the retries: it can wait
-        // between attempts, and the event handler cannot.
+        // between attempts, and the event handler cannot. It never gives up
+        // on a reason code either - a router nobody is standing next to is
+        // not a thing to open a setup portal about.
         if (s_joined_once) return;
-        if (s_retries < MAX_STA_RETRY) {
-            s_retries++;
-            ESP_LOGW(TAG, "reconnecting (%d/%d)", s_retries, MAX_STA_RETRY);
-            esp_wifi_connect();
+
+        if (auth_failure(reason)) {
+            if (++s_auth_fails >= AUTH_FAILS_BEFORE_PORTAL) {
+                ESP_LOGW(TAG, "reason %u: the password is not being accepted", reason);
+                xEventGroupSetBits(s_events, BIT_FAILED);
+                return;
+            }
         } else {
-            xEventGroupSetBits(s_events, BIT_FAILED);
+            s_auth_fails = 0;
         }
+        // Everything else - and NO_AP_FOUND above all - is worth another go
+        // until the join deadline: it is what a router that is still booting
+        // looks like from here.
+        if (++s_join_tries > JOIN_MAX_ATTEMPTS) {
+            ESP_LOGW(TAG, "%d join attempts and none took; letting the deadline run out",
+                     s_join_tries);
+            return;             // the wait in net_start() opens the portal
+        }
+        ESP_LOGW(TAG, "join attempt %d did not take (reason %u); trying again",
+                 s_join_tries, reason);
+        esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
@@ -82,7 +126,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             s_last_ip = e->ip_info.ip.addr;
             s_ip_changed = true;
         }
-        s_retries = 0;
+        s_join_tries = 0;
+        s_auth_fails = 0;
         s_backoff_ms = RECONNECT_MIN_MS;
         s_connected = true;
         s_joined_once = true;
@@ -227,15 +272,17 @@ bool net_start(void) {
 
     {
         EventBits_t bits = xEventGroupWaitBits(s_events, BIT_CONNECTED | BIT_FAILED,
-                                               pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
+                                               pdFALSE, pdFALSE,
+                                               pdMS_TO_TICKS(JOIN_WAIT_MS));
         if (bits & BIT_CONNECTED) {
             // Nothing below this point may assume the link stays up.
             xTaskCreate(link_task, "link", 3072, NULL, 5, NULL);
             return true;
         }
-        // Wrong password, or the network moved. Fall back to the portal
-        // rather than rebooting into the same failure forever.
-        ESP_LOGW(TAG, "could not join %s; opening setup portal", ssid);
+        // Wrong password, or the network is not within reach. Fall back to
+        // the portal rather than rebooting into the same failure forever.
+        ESP_LOGW(TAG, "could not join %s in %us (%d attempts); opening setup portal",
+                 ssid, (unsigned)(JOIN_WAIT_MS / 1000), s_join_tries);
         s_sta_configured = false;
         esp_wifi_stop();
         start_ap();
