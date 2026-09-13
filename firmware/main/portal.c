@@ -862,7 +862,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         "window.OB=1;b.disabled=true;"
         "const x=new XMLHttpRequest();x.open('POST','/ota');"
         "x.upload.onprogress=e=>{s.textContent='yükleniyor '+"
-        "Math.round(e.loaded*100/(e.total||f.size))+'%'};"
+        "Math.round(e.loaded*100/(e.total||f.size))+'%%'};"
         "x.onload=()=>{if(x.status==200){s.textContent="
         "'yazıldı, cihaz yeniden başlıyor - sayfayı 1-2 dakika sonra yenile'}"
         "else{s.textContent='olmadı: '+x.responseText;b.disabled=false;window.OB=0}};"
