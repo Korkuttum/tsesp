@@ -6,6 +6,7 @@
 #include "esp_http_server.h"
 #include "esp_wifi.h"
 #include "lwip/etharp.h"
+#include "logbuf.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -257,6 +258,20 @@ uint32_t portal_idle_ms(void) {
     // - the minutes that matter - that reads as somebody standing here.
     if (!s_last_req_ms) return 0xffffffffu;
     return (uint32_t)(esp_timer_get_time() / 1000) - s_last_req_ms;
+}
+
+// The log, as plain text. Deliberately not on the dashboard: it is for
+// whoever is debugging, and it is the difference between diagnosing this
+// device from here and driving to it.
+static esp_err_t get_log(httpd_req_t *req) {
+    char *buf = malloc(4096);
+    size_t n;
+    if (!buf) return httpd_resp_send_500(req);
+    n = logbuf_read(buf, 4096);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, buf, n);
+    free(buf);
+    return ESP_OK;
 }
 
 static esp_err_t get_setup(httpd_req_t *req) {
@@ -1139,6 +1154,10 @@ esp_err_t portal_start(bool captive) {
         // can still be re-flashed by joining its own, which is one fewer
         // reason to need a cable.
         httpd_uri_t ota = { .uri = "/ota", .method = HTTP_POST, .handler = post_ota };
+        {
+            httpd_uri_t lg = { .uri = "/log", .method = HTTP_GET, .handler = get_log };
+            httpd_register_uri_handler(s_server, &lg);
+        }
         httpd_register_uri_handler(s_server, &root);
         httpd_register_uri_handler(s_server, &setup);
         httpd_register_uri_handler(s_server, &save);

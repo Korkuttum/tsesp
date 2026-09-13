@@ -32,6 +32,7 @@ static uint32_t     s_our_ip;        // our own tailnet address, network order
 // reply never comes back - and both look identical from outside, which is
 // "ping does not work" with nothing in the log to say which half is broken.
 // These three counters separate them.
+static uint32_t     s_trace_in, s_trace_out;
 static uint32_t     s_fwd_in;        // arrived for some address that is not ours
 static uint32_t     s_fwd_out;       // left here on behalf of a LAN address
 static uint32_t     s_too_big;       // dropped: longer than the tunnel MTU
@@ -54,13 +55,25 @@ static err_t tun_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *d
 
     if (s_send(buf, len, dst->addr) != 0) return ERR_RTE;
     s_out++;
+
     // Runs on the lwIP thread, so this counts and says nothing. A packet
     // whose source is not our own address is one NAPT rewrote on the way
     // back from the LAN: proof the far half of subnet routing answered.
     if (len >= 20) {
         uint32_t src;
         memcpy(&src, buf + 12, 4);
-        if (src != s_our_ip) s_fwd_out++;
+        if (src != s_our_ip) {
+            s_fwd_out++;
+            // Only traffic on behalf of the LAN. Our own tailnet chatter would
+            // fill the log ring in a second and tell us nothing.
+            if (s_trace_out < 40) {
+                const uint8_t *a = buf + 12, *b = buf + 16;
+                s_trace_out++;
+                ESP_LOGW(TAG, "LAN->TS %u.%u.%u.%u -> %u.%u.%u.%u proto=%u len=%u",
+                         a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3],
+                         buf[9], (unsigned)len);
+            }
+        }
     }
     return ERR_OK;
 }
@@ -157,6 +170,12 @@ void tun_input(const uint8_t *ip_packet, size_t len) {
         if (dst != s_our_ip) {
             const uint8_t *s = (const uint8_t *)&src, *d = (const uint8_t *)&dst;
             s_fwd_in++;
+            if (s_trace_in < 40) {
+                s_trace_in++;
+                ESP_LOGW(TAG, "TS->LAN %u.%u.%u.%u -> %u.%u.%u.%u proto=%u len=%u",
+                         s[0], s[1], s[2], s[3], d[0], d[1], d[2], d[3],
+                         ip_packet[9], (unsigned)len);
+            }
             if (!s_logged_first_fwd) {
                 s_logged_first_fwd = true;
                 ESP_LOGI(TAG, "routing for the tailnet: %u.%u.%u.%u -> %u.%u.%u.%u "

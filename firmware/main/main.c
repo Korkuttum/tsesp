@@ -29,6 +29,7 @@
 #include "magic.h"
 #include "derp_task.h"
 #include "tun.h"
+#include "logbuf.h"
 #include "ota.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
@@ -524,7 +525,12 @@ static void apply_lan_config(void) {
 // -------------------------------------------------------------------- boot
 
 void app_main(void) {
-    esp_err_t err = nvs_flash_init();
+    esp_err_t err;
+
+    // Before anything that might fail: a log nobody can read is no log.
+    logbuf_start();
+
+    err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
