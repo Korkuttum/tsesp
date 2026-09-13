@@ -54,6 +54,10 @@ typedef struct {
     char     code[8];                  // "fra", "ams", ...
 } ts_derp_region;
 
+// We only ever advertise one network, and control could in principle approve
+// more; two is enough to notice that and not so many that it costs anything.
+#define TS_MAX_SELF_ROUTES 2
+
 typedef struct {
     uint64_t self_id;
     char self_name[TS_NAME_STR];
@@ -64,6 +68,18 @@ typedef struct {
     char self_endpoints[TS_MAX_ENDPOINTS][TS_ADDR_STR];
     int  self_nendpoints;
     int  self_has_disco;      // the server kept the disco key we sent
+    // Subnet routes the control plane has approved for us. Advertising a
+    // route is one-sided: it does nothing until somebody clicks approve in
+    // the admin console, and until then peers are never told to send that
+    // traffic here. The approved ones come back in our own AllowedIPs -
+    // everything there that is not one of our own host addresses - so this
+    // is the one place the device can tell "advertised" from "in use".
+    char self_routes[TS_MAX_SELF_ROUTES][TS_ADDR_STR];
+    int  self_nroutes;
+    // Whether the record carried AllowedIPs at all. Without it, an empty
+    // route list means "we were not told", not "not approved" - and the two
+    // deserve different words on the status page.
+    int  self_has_allowed_ips;
     char domain[TS_NAME_STR];
     int  peer_count;
     int  message_count;

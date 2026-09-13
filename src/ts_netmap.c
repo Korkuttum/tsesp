@@ -193,6 +193,16 @@ static void on_value(void *ctx, const char *path, const char *v, size_t len,
         p->info.self_has_disco = 1;
         return;
     }
+    // "100.x.y.z/32" and "fd7a:.../128" are our own addresses; a shorter
+    // prefix is a network, which means an approved subnet route.
+    if (strcmp(path, "Node.AllowedIPs[]") == 0 && type == JSON_STRING) {
+        int host_addr = (len > 3 && memcmp(v + len - 3, "/32", 3) == 0) ||
+                        (len > 4 && memcmp(v + len - 4, "/128", 4) == 0);
+        p->info.self_has_allowed_ips = 1;
+        if (!host_addr && p->info.self_nroutes < TS_MAX_SELF_ROUTES)
+            set_str(p->info.self_routes[p->info.self_nroutes++], TS_ADDR_STR, v, len);
+        return;
+    }
     if (strcmp(path, "Node.Endpoints[]") == 0 && type == JSON_STRING) {
         if (p->info.self_nendpoints < TS_MAX_ENDPOINTS)
             set_str(p->info.self_endpoints[p->info.self_nendpoints++],
@@ -304,6 +314,8 @@ static void start_message(ts_netmap_parser *p) {
     // Per-message, not cumulative: each netmap restates our own record.
     p->info.self_nendpoints = 0;
     p->info.self_naddrs = 0;
+    p->info.self_nroutes = 0;
+    p->info.self_has_allowed_ips = 0;
     p->info.self_has_disco = 0;
     p->info.nderp = 0;
     cbs.on_value = on_value;

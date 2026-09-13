@@ -29,7 +29,7 @@
 static const char *TAG = "portal";
 static httpd_handle_t s_server;
 static portal_status s_status = { .state = "starting", .tailnet_addr = "", .name = "",
-                                  .login_url = "", .route = "",
+                                  .login_url = "", .route = "", .route_approved = -1,
                                   .peers = 0, .paths_up = 0 };
 
 void portal_set_status(const portal_status *s) { s_status = *s; }
@@ -560,6 +560,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     uint32_t link_reconnects = 0;
     int i, n;
     uint32_t pings = 0, pongs = 0, tun_in = 0, tun_out = 0, derp_tx = 0, derp_rx = 0;
+    uint32_t fwd_in = 0, fwd_out = 0, fwd_big = 0;
     esp_chip_info_t chip;
     uint32_t flash = 0;
     const esp_partition_t *app = esp_ota_get_running_partition();
@@ -575,6 +576,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     net_get_link_stats(&link_reconnects, NULL);
     magic_stats(&pings, &pongs);
     tun_stats(&tun_in, &tun_out);
+    tun_route_stats(&fwd_in, &fwd_out, &fwd_big);
     derp_task_stats(&derp_tx, &derp_rx);
     cpu_load(&core0, &core1);
     esp_chip_info(&chip);
@@ -647,6 +649,12 @@ static esp_err_t get_status(httpd_req_t *req) {
         "</div>"
         "<h2>Adresler</h2><p class=hint>&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.</p><div class=grid>"
         "%s%s%s</div>"
+        "<h2>Ev ağına uzaktan erişim</h2><p class=hint>Uzaktan bir ev cihazına erişemiyorsan bu bölüm hangi yarının bozuk olduğunu söyler. Gelen istek sıfır: paket buraya hiç ulaşmıyor (rota onaylanmamış, uzaktaki cihazda subnet rotaları kapalı, ya da oradaki yerel ağ bu ağla aynı numarada). Gelen var, yanıt yok: sorun ev ağındaki cihazda.</p><div class=grid>"
+        "<div class=cell><div class=k>Rota onayı</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>Gelen istek</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Boyu aşıp düşen</div><div class=v>%u<small> paket</small></div></div>"
+        "</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Bağlantı denemesi</div><div class=v>%u</div></div>"
@@ -661,6 +669,9 @@ static esp_err_t get_status(httpd_req_t *req) {
                    magic_get_public(pub, sizeof(pub)) ? pub : "henüz belirlenmedi"), c3),
         (copy_cell(c4, sizeof(c4), "Paylaşılan ev ağı",
                    s_status.route[0] ? s_status.route : "-"), c4),
+        s_status.route_approved > 0 ? "onaylandı" :
+            s_status.route_approved == 0 ? "onay bekliyor" : "bilinmiyor",
+        (unsigned)fwd_in, (unsigned)fwd_out, (unsigned)fwd_big,
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
         (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);

@@ -25,4 +25,11 @@ void tun_input(const uint8_t *ip_packet, size_t len);
 bool tun_is_up(void);
 void tun_stats(uint32_t *in, uint32_t *out);
 
+// The subnet routing half of the same traffic, kept apart because it is the
+// part that breaks on its own: `fwd_in` counts packets a peer sent us for
+// some other address (nothing here means the route never reached the peer),
+// `fwd_out` the answers that came back off the LAN, and `too_big` packets
+// dropped for being longer than the tunnel MTU.
+void tun_route_stats(uint32_t *fwd_in, uint32_t *fwd_out, uint32_t *too_big);
+
 #endif

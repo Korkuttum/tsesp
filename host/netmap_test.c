@@ -157,6 +157,13 @@ int main(int argc, char **argv) {
         for (i = 0; i < parser.info.self_naddrs; i++)
             printf("  address : %s\n", parser.info.self_addrs[i]);
     }
+    {
+        int i;
+        for (i = 0; i < parser.info.self_nroutes; i++)
+            printf("  route   : %s  (approved)\n", parser.info.self_routes[i]);
+        if (parser.info.self_has_allowed_ips && !parser.info.self_nroutes)
+            printf("  route   : none approved\n");
+    }
     if (parser.info.domain[0]) printf("  tailnet : %s\n", parser.info.domain);
     printf("  peers   : %d\n", parser.info.peer_count);
 

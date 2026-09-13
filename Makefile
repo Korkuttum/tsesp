@@ -14,7 +14,7 @@ CORE := src/blake2s.c src/x25519.c src/poly1305.c src/chacha20poly1305.c src/ts2
 # Offline known-answer tests. These are what `make test` runs.
 TESTS := build/selftest build/hpack_test build/json_test build/stun_test \
          build/nacl_test build/disco_test build/path_test build/client_test \
-         build/wireguard_test
+         build/wireguard_test build/route_test
 
 # Programs that talk to a real control server.
 LIVE  := build/ts2021_handshake build/register_test build/netmap_test build/h2_probe
@@ -59,6 +59,10 @@ build/client_test: host/client_test.c $(CORE)
 build/wireguard_test: | build
 build/wireguard_test: host/wireguard_test.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ host/wireguard_test.c $(CORE)
+
+build/route_test: | build
+build/route_test: host/route_test.c $(CORE)
+	$(CC) $(CFLAGS) -o $@ host/route_test.c $(CORE)
 
 build/ts2021_handshake: | build
 build/ts2021_handshake: host/handshake_test.c $(CORE)

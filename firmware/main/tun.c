@@ -12,6 +12,19 @@ static struct netif s_netif;
 static tun_send_fn  s_send;
 static bool         s_up;
 static uint32_t     s_in, s_out;
+static uint32_t     s_our_ip;        // our own tailnet address, network order
+
+// Subnet routing is the one path that fails silently. A packet for a LAN
+// address is handed to lwIP exactly like a packet for us, and from there on
+// everything happens inside the stack: if the route was never approved the
+// packet never arrives at all, and if the LAN host is off or firewalled the
+// reply never comes back - and both look identical from outside, which is
+// "ping does not work" with nothing in the log to say which half is broken.
+// These three counters separate them.
+static uint32_t     s_fwd_in;        // arrived for some address that is not ours
+static uint32_t     s_fwd_out;       // left here on behalf of a LAN address
+static uint32_t     s_too_big;       // dropped: longer than the tunnel MTU
+static bool         s_logged_first_fwd;
 
 // Tailscale's own MTU. Leaves room for the WireGuard header inside a normal
 // 1500-byte path without fragmenting.
@@ -23,13 +36,21 @@ static err_t tun_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *d
 
     (void)netif;
     if (!s_send) return ERR_IF;
-    if (p->tot_len > sizeof(buf)) return ERR_MEM;
+    if (p->tot_len > sizeof(buf)) { s_too_big++; return ERR_MEM; }
 
     len = pbuf_copy_partial(p, buf, p->tot_len, 0);
     if (len != p->tot_len) return ERR_BUF;
 
     if (s_send(buf, len, dst->addr) != 0) return ERR_RTE;
     s_out++;
+    // Runs on the lwIP thread, so this counts and says nothing. A packet
+    // whose source is not our own address is one NAPT rewrote on the way
+    // back from the LAN: proof the far half of subnet routing answered.
+    if (len >= 20) {
+        uint32_t src;
+        memcpy(&src, buf + 12, 4);
+        if (src != s_our_ip) s_fwd_out++;
+    }
     return ERR_OK;
 }
 
@@ -48,6 +69,7 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
     ip4_addr_t ip, mask, gw;
 
     s_send = send;
+    s_our_ip = our_ip_be;
     ip.addr = our_ip_be;
     // 255.192.0.0 is 100.64.0.0/10, the whole tailnet range, so packets for
     // any peer are handed to this interface rather than the default route.
@@ -78,6 +100,27 @@ void tun_input(const uint8_t *ip_packet, size_t len) {
     // that anything uses yet.
     if ((ip_packet[0] >> 4) != 4) return;
 
+    // Addressed to someone else: a peer is using us as a subnet router. Say
+    // so once, because the first such packet is the answer to the only
+    // question worth asking when remote access to the LAN does not work -
+    // whether the route reached the peer at all. Everything after that is a
+    // counter; a log line per forwarded packet would drown the console.
+    if (len >= 20) {
+        uint32_t dst, src;
+        memcpy(&src, ip_packet + 12, 4);
+        memcpy(&dst, ip_packet + 16, 4);
+        if (dst != s_our_ip) {
+            const uint8_t *s = (const uint8_t *)&src, *d = (const uint8_t *)&dst;
+            s_fwd_in++;
+            if (!s_logged_first_fwd) {
+                s_logged_first_fwd = true;
+                ESP_LOGI(TAG, "routing for the tailnet: %u.%u.%u.%u -> %u.%u.%u.%u "
+                              "(subnet route is in use)",
+                         s[0], s[1], s[2], s[3], d[0], d[1], d[2], d[3]);
+            }
+        }
+    }
+
     p = pbuf_alloc(PBUF_RAW, (uint16_t)len, PBUF_RAM);
     if (!p) return;
     memcpy(p->payload, ip_packet, len);
@@ -95,4 +138,10 @@ bool tun_is_up(void) { return s_up; }
 void tun_stats(uint32_t *in, uint32_t *out) {
     if (in) *in = s_in;
     if (out) *out = s_out;
+}
+
+void tun_route_stats(uint32_t *fwd_in, uint32_t *fwd_out, uint32_t *too_big) {
+    if (fwd_in) *fwd_in = s_fwd_in;
+    if (fwd_out) *fwd_out = s_fwd_out;
+    if (too_big) *too_big = s_too_big;
 }

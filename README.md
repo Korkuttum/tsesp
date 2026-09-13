@@ -57,6 +57,63 @@ Kod tarafında bitmemiş bir şey yok; eksik olan **saha testi**:
 Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
 Hız beklentisi 1-3 Mbps.
 
+### Cihazın 100.x adresine ping gidiyor ama ev ağına gitmiyor
+
+Bu, subnet routing'in tipik arızası ve tek bir anlamı var: tünel çalışıyor
+(cihazın kendi adresi cevap veriyor), ama LAN'a giden yol bir yerde kopuk.
+Kopukluğun iki yarısı vardır ve dışarıdan ikisi de aynı görünür — istek
+buraya hiç ulaşmıyordur, ya da ulaşıp yanıt dönmüyordur. Durum sayfasındaki
+**Ağ → Ev ağına uzaktan erişim** bölümü ikisini ayırır:
+
+| Rota onayı | Gelen istek | Dönen yanıt | Sorun |
+|---|---|---|---|
+| onay bekliyor | 0 | 0 | Rota admin panelde onaylanmamış |
+| onaylandı | 0 | 0 | Uzaktaki cihaz rotayı kullanmıyor, ya da adres çakışması |
+| onaylandı | artıyor | 0 | Sorun ev ağındaki hedef cihazda |
+| onaylandı | artıyor | artıyor | Yol çalışıyor; sorun uygulama/port tarafında |
+
+"Rota onayı" cihazın kendi netmap'inden geliyor: onaylanan rotalar düğümün
+`AllowedIPs`'inde geri döner, onaylanmayan hiçbir yerde görünmez. Yani
+"ilan ettim" ile "kullanılıyor" ayrı iki şey, ve cihaz artık hangisinde
+olduğunu söylüyor. Log'da da tek satır olarak geçiyor:
+
+```
+route 192.168.1.0/24 approved; peers can reach that network through this device
+route 192.168.1.0/24 advertised but NOT approved; approve it in the admin console
+tun: routing for the tailnet: 100.101.7.3 -> 192.168.1.50 (subnet route is in use)
+```
+
+Üçüncü satır ilk yönlendirilen pakette bir kez basılır — istek cihaza
+ulaştıysa oradadır, ulaşmadıysa yoktur.
+
+Gelen istek sıfır kalıyorsa sırayla:
+
+1. **Onay.** Admin panel → Machines → cihaz → Subnet routes → rotayı onayla.
+2. **Uzaktaki cihaz rotayı kabul ediyor mu.** Linux'ta varsayılan *kapalı*:
+   `tailscale up --accept-routes`. Mac/Windows/iOS/Android kabul eder.
+   `tailscale status` çıktısında cihazın yanında rota görünmeli.
+3. **Adres çakışması.** En sık sebep bu, ve hiçbir log'a düşmez: bulunduğun
+   yerin yerel ağı da `192.168.1.0/24` ise (Türkiye'de modemlerin
+   varsayılanı), `192.168.1.50`'ye giden paket kendi ağına gider, tünele
+   hiç girmez. Test: `tailscale ping 192.168.1.50` — "no matching route"
+   diyorsa 1 veya 2, kendi ağından cevap geliyorsa çakışma var. Çözümü
+   köy evindeki modemin LAN'ını başka bir aralığa almak
+   (`192.168.37.0/24` gibi); cihaz yeni adresi görünce rotayı kendisi
+   günceller, ama **yeni rotanın panelde tekrar onaylanması gerekir**.
+4. **Mobil veriden dene.** WiFi'ı kapatmak 3. maddeyi bir hamlede eler.
+
+Gelen istek artıyor ama yanıt dönmüyorsa sorun bu cihazda değil: hedef
+kapalı, adresi DHCP ile değişmiş, ya da güvenlik duvarı ICMP'ye cevap
+vermiyor (Windows'ta varsayılan). NAPT sayesinde paketler ev ağına bu
+cihazın kendi adresinden geliyor gibi görünür, yani hedefin tailnet'i
+tanımasına gerek yok — aynı alt ağdan gelen normal bir komşu görür.
+Başka bir ev cihazından ping deneyip hedefin gerçekten ayakta olduğunu
+doğrulamak en hızlı ayrımdır.
+
+Aynı bölümdeki üçüncü sayaç ("Boyu aşıp düşen") tünel MTU'sundan (1280 bayt)
+uzun olduğu için düşürülen paketleri sayar. Ping ile alakası yok; sıfır
+değilse belirtisi "bağlanıyor ama büyük transferler takılıyor" olur.
+
 ### Modem yeniden başlatma: iki hata
 
 "WiFi koptuğunda toparlanma" bu listedeydi ve sahada patladı — modem yeniden
@@ -214,6 +271,7 @@ make                       # her şeyi derle
 ./build/selftest           # kripto known-answer testleri
 ./build/hpack_test         # RFC 7541 Ek C
 ./build/json_test          # streaming parser, her bölünme noktası
+./build/route_test         # rota onayı: netmap'ten okunan AllowedIPs
 ./build/ts2021_handshake   # canlı sunucuyla Noise handshake
 ./build/register_test      # tam yığın: kayıt isteği -> login URL
 ./build/stun_test          # STUN parser + canlı sorgu

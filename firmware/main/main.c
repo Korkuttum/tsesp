@@ -74,6 +74,7 @@ static char s_local_ep[32];      // 192.168.x.y:41641
 static char s_route[24];         // the LAN we offer to route for
 static bool s_napt_on;
 static uint32_t s_napt_addr;     // the address NAPT currently rewrites to
+static int s_route_approved = -1;   // -1 until a netmap restates our own record
 static char s_public_ep[52];     // what STUN told us, if anything
 
 static void log_request_body(const char *body, size_t len) {
@@ -93,6 +94,7 @@ static void publish_status(const char *state) {
         .name = s_magic_name,
         .login_url = s_login_url,
         .route = s_route,
+        .route_approved = s_route_approved,
         .peers = peers_count(),
         .paths_up = magic_paths_up(),
         .free_heap = (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
@@ -199,6 +201,26 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
         if (!info->self_nendpoints)
             ESP_LOGW(TAG, "control plane lists no endpoints for us; peers have "
                           "no address to reach this device at");
+    }
+
+    // The approval for our subnet route lives in the admin console, and the
+    // netmap is where the answer comes back. Worth saying out loud in both
+    // directions: somebody may click approve days after the device shipped,
+    // and a route can be revoked just as quietly.
+    if (info->self_naddrs && s_route[0] && info->self_has_allowed_ips) {
+        int approved = 0, i;
+        for (i = 0; i < info->self_nroutes; i++)
+            if (strcmp(info->self_routes[i], s_route) == 0) approved = 1;
+        if (approved != s_route_approved) {
+            if (approved)
+                ESP_LOGI(TAG, "route %s approved; peers can reach that network "
+                              "through this device", s_route);
+            else
+                ESP_LOGW(TAG, "route %s advertised but NOT approved; approve it in "
+                              "the admin console or no peer will send LAN traffic "
+                              "here", s_route);
+            s_route_approved = approved;
+        }
     }
 
     ESP_LOGI(TAG, "netmap #%d: %s, %d peers known, heap %u",
@@ -482,9 +504,11 @@ static void apply_lan_config(void) {
 
     // Peers were handed our old address and the old route. Neither is true
     // any more, so say so now rather than at the next sixty-second tick.
-    if (was[0] && strcmp(was, s_route) != 0)
+    if (was[0] && strcmp(was, s_route) != 0) {
         ESP_LOGW(TAG, "route changed: %s -> %s; re-approve it in the admin console",
                  was, s_route);
+        s_route_approved = -1;      // the old answer was about the old network
+    }
     s_push_wanted = true;
 }
 

@@ -43,6 +43,11 @@ typedef struct {
     const char *name;        // MagicDNS adı
     const char *login_url;
     const char *route;       // the LAN we offer to route for
+    // Whether control has approved that route: 1 yes, 0 advertised but not
+    // approved, -1 not known yet (no netmap has restated our own record).
+    // Advertising is half the job; without the approval peers are never told
+    // to send LAN traffic here, and nothing about the tunnel looks wrong.
+    int         route_approved;
     int         peers;
     int         paths_up;
     unsigned    free_heap;
