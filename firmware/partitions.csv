@@ -1,8 +1,18 @@
 # Name,     Type, SubType,  Offset,   Size
-# The default table gives the app 1 MB, which TLS and its certificate bundle
-# push past. There is 4 MB on this module, so the app gets 2 MB and the rest
-# is left free for whatever comes later.
+# Two app slots, so the firmware can be replaced over the tunnel, and the
+# otadata the bootloader reads to pick between them - and to fall back to the
+# older one when a new image never confirms itself. The room comes from the
+# 1.9 MB spiffs partition that used to sit here and was never mounted by
+# anything.
+#
+# nvs keeps its offset and size on purpose: `idf.py flash` does not touch it,
+# so moving to this table costs neither the Wi-Fi credentials nor the tailnet
+# identity. `erase-flash` would, and there is no reason to run it.
+#
+# An app partition has to start on a 64 KB boundary, which leaves
+# 0x12000-0x20000 unused. Nothing needs it yet.
 nvs,        data, nvs,      0x9000,   0x6000
 phy_init,   data, phy,      0xf000,   0x1000
-factory,    app,  factory,  0x10000,  0x200000
-storage,    data, spiffs,   0x210000, 0x1F0000
+otadata,    data, ota,      0x10000,  0x2000
+ota_0,      app,  ota_0,    0x20000,  0x1E0000
+ota_1,      app,  ota_1,    0x200000, 0x1E0000

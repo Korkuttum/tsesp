@@ -22,6 +22,7 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 | 10 | lwIP arayüzü — cihaz kendi 100.x adresinde | ✅ ping %0 kayıp, sayfa tünelden |
 | 11 | NAPT subnet routing | ⚠️ NAPT yanlış arayüzdeydi, düzeltildi; **karta yazılıp denenmesi bekliyor** |
 | 12 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ✅ |
+| 13 | OTA: tünelden yazılım güncelleme + geri alma | ⚠️ kod hazır, **bir kez kabloyla yazılması bekliyor** |
 
 Zincirin tamamı kartta çalışıyor:
 
@@ -283,6 +284,92 @@ katlanan, 60 saniyede sınırlanan bir bekleme var.
 Testler eski kodda düşüyor, yenisinde geçiyor (`./build/wireguard_test`).
 Kartta ölçülen: ilk 40 saniyeden sonra 5 peer-handshake, sıfır reddetme;
 kapalı peer'a denemeler 5.6 → 11.3 → 20.8 sn aralıklarla seyreldi.
+
+## Uzaktan güncelleme (OTA)
+
+Cihaz köy evinde; reset atabilecek en yakın insan bir saatlik yol ve belki bir
+hafta uzakta. O yüzden güncelleme "yaz ve inan" değil: önyükleyici çalışan
+imajı saklıyor, yeni imaj **deneme** olarak açılıyor, ve ancak kendini
+kanıtladıktan sonra kalıcı oluyor.
+
+### Bir kerelik kablo
+
+Eski bölüm tablosunda tek `factory` bölümü vardı — OTA'nın ikinci bir app
+slotu ve `otadata`'sı olmadan çalışması mümkün değil, bölüm tablosu da app
+seviyesinden değiştirilemiyor. Yani **bu sefer kabloyla yazmak zorunlu**,
+sonrası tünelden.
+
+Yer, hiçbir şeyin mount etmediği 1.9 MB'lık spiffs bölümünden geldi:
+
+```
+nvs       data  nvs     0x009000 ..0x00F000      24 KB
+phy_init  data  phy     0x00F000 ..0x010000       4 KB
+otadata   data  ota     0x010000 ..0x012000       8 KB
+ota_0     app   ota_0   0x020000 ..0x200000    1920 KB
+ota_1     app   ota_1   0x200000 ..0x3E0000    1920 KB
+```
+
+`nvs` yerinde ve aynı boyutta kaldı, `idf.py flash` de ona dokunmuyor: yeni
+tabloya geçmek ne Wi-Fi bilgisini ne tailnet kimliğini siliyor. `erase-flash`
+silerdi, çalıştırmaya da gerek yok.
+
+```
+rm -f firmware/sdkconfig        # sdkconfig.defaults yeniden okunsun
+cd firmware && idf.py set-target esp32 && idf.py build
+idf.py -p /dev/cu.usbserial-0001 flash monitor
+```
+
+İlk satır önemli: `sdkconfig` .gitignore'da ve ESP-IDF, dosya varsa
+`sdkconfig.defaults`'u **okumuyor**. Unutulursa yeni bölüm tablosu ve rollback
+ayarı sessizce uygulanmaz — o yüzden `ota.c` ile `tun.c`'ye birer `#error`
+kondu: eksik ayarla derleme, sebebini ve çözümünü söyleyerek durur.
+
+Uygulama 1920 KB'a sığmak zorunda. Sığmazsa derleme yüksek sesle patlar; o da
+kablo elindeyken olacağı için sorun değil.
+
+### Sonraki her güncelleme tünelden
+
+```
+curl -H 'Expect:' --data-binary @firmware/build/tsesp.bin \
+     http://100.115.225.84/ota
+```
+
+Ya da durum sayfası → Ayarlar → Yazılım güncelleme: dosyayı seç, yükle,
+yüzde göstergesini izle. İmaj ham gövde olarak gidiyor; multipart yok, yani
+97 KB heap'te ayrıştırılacak bir sarmalayıcı da yok.
+
+Cihaz yazmadan önce imajın ilk 288 baytını kontrol ediyor: ESP32 imaj sihirli
+baytı, app tanımlayıcısı, ve **proje adı**. Ulaşamadığın bir karta alakasız
+bir `.bin` yazmak geri dönüşü olmayan tek hata, ve iki kontrol de zaten
+başlıkta.
+
+### Deneme süresi ve geri alma
+
+Yeni imaj `PENDING_VERIFY` olarak açılıyor. Kalıcı olması iki koşula bağlı:
+
+1. **netmap geldi** — yani Wi-Fi, kontrol düzlemi ve kayıt çalışıyor, cihaz
+   yine uzaktan erişilebilir durumda,
+2. **açılışın 120. saniyesi geçti** — açılıp kaydolduktan sonra panikleyen bir
+   imaj yoksa kendini onaylayıp cihazı sonsuz yeniden başlama döngüsünde
+   bırakabilirdi.
+
+İkisi olunca `esp_ota_mark_app_valid_cancel_rollback()` çağrılıyor ve log'a
+tek satır düşüyor. Olmazsa: imaj çalışmaya devam eder, ama **bir sonraki
+açılışta** önyükleyici eski slota döner. Bozuk bir güncelleme bir yeniden
+başlamaya mal olur, yola çıkmaya değil.
+
+Bunun bedeli de var ve bilerek kabul edildi: deneme süresi tamamlanmadan
+elektrik kesilirse (köyde olur) sağlıklı bir imaj da geri alınır. Yön olarak
+güvenli taraf bu. Geri alma sessiz de değil — durum sayfası "en son yüklenen
+yazılım kendini onaylayamadı" notunu gösteriyor, yoksa geri dönmüş bir
+güncelleme hiç yüklenmemiş gibi görünürdü.
+
+Kurulum modunda da (`tsesp-xxxx` ağı) `/ota` açık: hiçbir ağa katılamayan bir
+cihaz kendi ağından yeniden yazılabiliyor — kabloya bir ihtiyaç daha az.
+
+**Denenmedi.** Bu ortamda ESP-IDF yok; yazılan kod derlenmedi. Üretilen
+sayfanın JavaScript'i `node --check` ile doğrulandı, bölüm tablosu hizalama ve
+taşma için hesaplandı, gerisi karta yazıldığında görülecek.
 
 ## Neden PSRAM'siz çalışabiliyor
 

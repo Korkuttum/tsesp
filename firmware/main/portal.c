@@ -15,6 +15,7 @@
 #include "magic.h"
 #include "derp_task.h"
 #include "tun.h"
+#include "ota.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_chip_info.h"
@@ -222,6 +223,11 @@ static const char CSS[] =
     "border:0;border-radius:10px;background:var(--blue);color:#fff}"
     "button.danger{background:transparent;border:1px solid var(--line);color:var(--red);"
     "font-size:13px;padding:10px}"
+    "button:disabled{opacity:.5}"
+    /* The file picker is the one control the browser draws itself; give it the
+       page's width and colour so it does not look pasted in. */
+    "input[type=file]{width:100%;margin-top:16px;font-size:13px;color:var(--dim)}"
+    "code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:var(--fg)}"
     "a{color:var(--blue);word-break:break-all}"
     "</style>";
 
@@ -545,8 +551,11 @@ static const char *bare_addr(const char *addr, char *buf, size_t cap) {
 }
 
 static esp_err_t get_status(httpd_req_t *req) {
-    char *page = malloc(24576);
-    size_t cap = 24576, o = 0;
+    // The panels are rendered in order and the settings one is last, so when
+    // this runs out it is the update form that disappears - the one control
+    // somebody may be reaching for from a long way away. Hence the headroom.
+    char *page = malloc(28672);
+    size_t cap = 28672, o = 0;
     char ip[16], up[24], esc[520], pub[64], wifi_ssid[36];
     char sig[240], m1[96], m2[96], m3[96];
     // Static, not on the stack: five of these is nearly 4 KB, and the HTTP
@@ -774,8 +783,37 @@ static esp_err_t get_status(httpd_req_t *req) {
         IDF_VER);
 
     /* ---- Ayarlar ---- */
+    {
+        ota_state ost = ota_running_state();
+        o += snprintf(page + o, cap - o,
+            "<div class='panel p5'>"
+            "<h2>Yazılım güncelleme</h2>"
+            "<p class=hint>Bilgisayarda derlenen <code>.bin</code> dosyasını yükle; "
+            "cihaz onu boştaki slota yazıp yeniden başlar. Yeni yazılım "
+            "<b>deneme</b> olarak açılır: tailnet'e geri bağlanıp iki dakika "
+            "ayakta kalırsa kalıcı olur, kalamazsa bir sonraki açılışta "
+            "önyükleyici eski sürüme döner. Yani bozuk bir güncelleme en fazla "
+            "bir yeniden başlamaya mal olur, yola çıkmaya değil.</p>"
+            "<div class=grid>"
+            "<div class=cell><div class=k>Çalışan slot</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>Durumu</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>Sürüm</div><div class=v>%s</div></div>"
+            "</div>"
+            "%s"
+            "<input type=file id=fw accept='.bin'>"
+            "<button id=fwb onclick='up()'>Yükle ve yeniden başlat</button>"
+            "<p class=hint id=fws></p>",
+            ota_running_slot(),
+            ost == OTA_IMG_TRIAL ? "deneme sürümü" :
+                ost == OTA_IMG_STABLE ? "kalıcı" : "bilinmiyor",
+            desc ? desc->version : "?",
+            // Otherwise a silently reverted update looks like one that never
+            // went up at all.
+            ota_rolled_back() ?
+                "<p class=hint><b>Not:</b> en son yüklenen yazılım kendini "
+                "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>" : "");
+    }
     o += snprintf(page + o, cap - o,
-        "<div class='panel p5'>"
         "<h2>Tailscale</h2>"
         "<p class=hint>Cihazın tailnet kimliğini siler ve yeni bir giriş bağlantısı "
         "üretir. Wi-Fi ayarları korunur.</p>"
@@ -793,7 +831,11 @@ static esp_err_t get_status(httpd_req_t *req) {
     o += snprintf(page + o, cap - o,
         "</div></div></div>"
         "<script>"
-        "setInterval(async()=>{try{"
+        // The refresh replaces the panels wholesale, which would throw away a
+        // chosen file or a running upload. OB parks it from the moment a file
+        // is picked; reloading the page brings the refresh back.
+        "document.addEventListener('change',e=>{if(e.target.id=='fw')window.OB=1});"
+        "setInterval(async()=>{if(window.OB)return;try{"
         "const r=await fetch('/',{cache:'no-store'});"
         "const d=new DOMParser().parseFromString(await r.text(),'text/html');"
         "for(const s of ['.hero','.panels']){"
@@ -810,6 +852,22 @@ static esp_err_t get_status(httpd_req_t *req) {
         "else{const t=document.createElement('textarea');t.value=v;t.style.position='fixed';"
         "t.style.opacity=0;document.body.appendChild(t);t.select();"
         "try{document.execCommand('copy');d()}catch(e){}document.body.removeChild(t)}}"
+        /* The image goes up as the raw body - the device writes what it reads,
+           so there is no multipart wrapper to strip on a chip with 97 KB of
+           heap. XMLHttpRequest rather than fetch, for upload progress. */
+        "function up(){const f=document.getElementById('fw').files[0];"
+        "const b=document.getElementById('fwb'),s=document.getElementById('fws');"
+        "if(!f){s.textContent='önce bir .bin dosyası seç';return}"
+        "if(!confirm(f.name+' yüklenecek ve cihaz yeniden başlayacak. Devam?'))return;"
+        "window.OB=1;b.disabled=true;"
+        "const x=new XMLHttpRequest();x.open('POST','/ota');"
+        "x.upload.onprogress=e=>{s.textContent='yükleniyor '+"
+        "Math.round(e.loaded*100/(e.total||f.size))+'%'};"
+        "x.onload=()=>{if(x.status==200){s.textContent="
+        "'yazıldı, cihaz yeniden başlıyor - sayfayı 1-2 dakika sonra yenile'}"
+        "else{s.textContent='olmadı: '+x.responseText;b.disabled=false;window.OB=0}};"
+        "x.onerror=()=>{s.textContent='bağlantı kesildi';b.disabled=false;window.OB=0};"
+        "x.send(f)}"
         "</script>");
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -885,6 +943,76 @@ static esp_err_t post_forget(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Takes the image as the raw request body: no multipart, so nothing has to be
+// unwrapped and nothing sits between the bytes on the wire and the bytes in
+// flash. The page uploads with XMLHttpRequest; from a laptop it is one line:
+//
+//   curl -H 'Expect:' --data-binary @build/tsesp.bin http://100.115.225.84/ota
+//
+// The empty Expect header is not decoration: curl asks for 100-continue on a
+// body this size and then waits a second for an answer this server does not
+// send.
+//
+// Failures answer with the reason in the body, because the person reading it
+// is the person who has to decide what to do about it.
+static esp_err_t post_ota(httpd_req_t *req) {
+    // Static, like the page buffers: the server serves one request at a time,
+    // and this is more than the handler task's stack wants to carry.
+    static char buf[2048];
+    size_t remaining = req->content_len;
+    int stalls = 0;
+
+    // An upload must not be cut short by the portal's own retry reboot.
+    mark_active();
+
+    if (ota_begin(remaining) != 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, ota_error());
+        return ESP_OK;
+    }
+
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(buf) ? remaining : sizeof(buf);
+        int got = httpd_req_recv(req, buf, want);
+
+        // A slow tunnel is not a failed upload - but a silent one must not
+        // hold the only web server task open for ever either. Twenty seconds
+        // a turn, fifteen turns: five minutes of nothing and it is over.
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++stalls <= 15) continue;
+            ota_abort();
+            httpd_resp_set_status(req, "408 Request Timeout");
+            httpd_resp_sendstr(req, "the upload went quiet");
+            return ESP_OK;
+        }
+        stalls = 0;
+        if (got <= 0) {
+            ota_abort();
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "the upload stopped before the end");
+            return ESP_OK;
+        }
+        if (ota_feed((const uint8_t *)buf, (size_t)got) != 0) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, ota_error());
+            return ESP_OK;
+        }
+        remaining -= (size_t)got;
+        mark_active();
+    }
+
+    if (ota_finish() != 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, ota_error());
+        return ESP_OK;
+    }
+
+    httpd_resp_sendstr(req, "written; rebooting into the new image on trial");
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+    return ESP_OK;
+}
+
 // A phone decides it is behind a captive portal by fetching a known URL and
 // noticing the answer is not what it expected. Redirecting everything makes
 // the setup page open by itself.
@@ -942,10 +1070,16 @@ esp_err_t portal_start(bool captive) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     esp_err_t err;
 
-    cfg.max_uri_handlers = 10;
+    cfg.max_uri_handlers = 12;
     cfg.lru_purge_enable = true;
     // The status page builds several kilobytes of markup.
     cfg.stack_size = 8192;
+    // A firmware upload arrives over the tunnel, where a relayed round trip is
+    // half a second and a flash erase stalls everything for tens of
+    // milliseconds at a time. The default five seconds is enough until it
+    // isn't, and losing a 1.9 MB upload to a hiccup is a bad trade.
+    cfg.recv_wait_timeout = 20;
+    cfg.send_wait_timeout = 20;
 
     err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) return err;
@@ -958,12 +1092,17 @@ esp_err_t portal_start(bool captive) {
         httpd_uri_t forget = { .uri = "/forget", .method = HTTP_POST, .handler = post_forget };
         httpd_uri_t settings = { .uri = "/settings", .method = HTTP_GET, .handler = get_settings };
         httpd_uri_t rejoin = { .uri = "/rejoin", .method = HTTP_POST, .handler = post_rejoin };
+        // Registered in setup mode too: a device that cannot join any network
+        // can still be re-flashed by joining its own, which is one fewer
+        // reason to need a cable.
+        httpd_uri_t ota = { .uri = "/ota", .method = HTTP_POST, .handler = post_ota };
         httpd_register_uri_handler(s_server, &root);
         httpd_register_uri_handler(s_server, &setup);
         httpd_register_uri_handler(s_server, &save);
         httpd_register_uri_handler(s_server, &forget);
         if (!captive) httpd_register_uri_handler(s_server, &settings);
         if (!captive) httpd_register_uri_handler(s_server, &rejoin);
+        httpd_register_uri_handler(s_server, &ota);
     }
 
     if (captive) {

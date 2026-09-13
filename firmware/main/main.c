@@ -29,6 +29,7 @@
 #include "magic.h"
 #include "derp_task.h"
 #include "tun.h"
+#include "ota.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
@@ -54,6 +55,12 @@ static const char *TAG = "tsesp";
 // enough to join it and open the page; a power cut has nobody waiting, and
 // does not care whether it heals in two minutes or five.
 #define PORTAL_GRACE_MS 300000
+// How long a freshly uploaded image has to stay up before it is made
+// permanent. Reaching the netmap is the proof that it can still be reached at
+// all; the two minutes are the second half of the test, because an image that
+// registers and then panics would otherwise confirm itself and leave the
+// device rebooting in a house where nobody can intervene.
+#define OTA_TRIAL_MS 120000
 
 static uint8_t s_machine[32], s_node_priv[32], s_disco_priv[32];
 static uint8_t s_node_pub[32], s_disco_pub[32], s_control_pub[32];
@@ -233,6 +240,11 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
         s_stun_done = true;
         magic_request_stun();
     }
+
+    // Whatever else this message was for, it is proof that this image can
+    // reach the tailnet. Together with the clock, that is everything a
+    // freshly uploaded image has to show before it stops being provisional.
+    if (now_ms() > OTA_TRIAL_MS) ota_confirm();
 
     publish_status("running");
     return 0;      // keep the session open
@@ -520,6 +532,15 @@ void app_main(void) {
     ESP_ERROR_CHECK(err);
 
     printf("\n=== tsesp ===\n");
+
+    // Said before anything else can fail: an image on trial goes back to the
+    // previous one at the next boot unless it earns its place, and knowing
+    // which of the two is running is the first thing to know.
+    if (ota_running_state() == OTA_IMG_TRIAL)
+        ESP_LOGW(TAG, "running %s ON TRIAL - it becomes permanent once the "
+                      "tailnet is reachable again", ota_running_slot());
+    else
+        ESP_LOGI(TAG, "running %s", ota_running_slot());
     if (tsesp_crypto_selftest() != 0) {
         // Refusing to run is the right answer: a device whose crypto is wrong
         // would fail in ways that look like network problems.

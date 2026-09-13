@@ -24,6 +24,12 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
 
+# Updating over the tunnel: two app slots (see partitions.csv) and a
+# bootloader that goes back to the previous image when a new one never
+# confirms itself. A box where nobody can press reset must not be one bad
+# image away from a car journey.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # Per-task runtime counters, so the dashboard can show real CPU load rather
 # than guessing from how busy things look.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y

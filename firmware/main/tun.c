@@ -7,6 +7,15 @@
 #include "esp_log.h"
 #include "tun.h"
 
+// Both options come from sdkconfig.defaults, which ESP-IDF reads only when it
+// creates sdkconfig - so a build tree from before they were added drops them
+// silently and subnet routing is compiled out with nothing to say so. It used
+// to surface as a link error on ip_napt_enable; this says it sooner, and says
+// what to do.
+#if !defined(CONFIG_LWIP_IP_FORWARD) || !defined(CONFIG_LWIP_IPV4_NAPT)
+#error "CONFIG_LWIP_IP_FORWARD / CONFIG_LWIP_IPV4_NAPT are off. Delete firmware/sdkconfig and build again so sdkconfig.defaults is applied; subnet routing needs both."
+#endif
+
 static const char *TAG = "tun";
 
 static struct netif s_netif;
