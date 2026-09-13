@@ -49,11 +49,37 @@ boş heap (her şey açık)   ~97 KB
 
 ## Kaldığı yer
 
-Kod tarafında bitmemiş bir şey yok; eksik olan **saha testi**:
+Sıradaki iş **karta yazmak**. Son iki değişiklik — NAPT'ın doğru arayüze
+taşınması ve OTA — hiç derlenmedi; yazıldıkları ortamda ESP-IDF yoktu. Bölüm
+tablosu da değiştiği için bu kez kabloyla yazmak zorunlu, sonrası tünelden.
 
-1. Admin panelde ilan edilen rotayı onayla
-2. Bağlanacağın cihazda "subnet route'ları kullan"ı aç
-3. **Mobil veriden** (WiFi kapalı) ev ağındaki bir adrese eriş
+```
+git checkout claude/remote-ping-issue-769775
+rm -f firmware/sdkconfig                       # atlanırsa derleme #error ile durur
+cd firmware && idf.py set-target esp32 && idf.py build
+idf.py -p /dev/cu.usbserial-XXXX flash monitor # erase-flash DEĞİL: nvs kalsın
+```
+
+Sonrası sırayla, ve **hepsi evde yapılabilir** — köyü beklemek gerekmiyor:
+
+1. **Açılış log'u.** Dört satır: `ota: running ota_0`,
+   `tun: interface up: 100.x.x.x/10`, `tun: NAPT on the tunnel side`,
+   `offering 192.168.x.0/24 as a route`.
+2. **Rotayı onayla** — admin panel → Machines → cihaz → Subnet routes.
+   Log'da `route ... approved`, durum sayfasında "onaylandı" çıkmalı.
+3. **Ev ağına eriş.** Telefonun Wi-Fi'ını kapat, mobil veriden ev ağındaki bir
+   adrese ping at. Bir kez `tun: routing for the tailnet: ... -> ...` basılmalı
+   ve ping dönmeli. NAPT düzeltmesi burada ya doğrulanır ya çürütülür; sayaçlar
+   (Ağ → Ev ağına uzaktan erişim) hangi yarıda kaldığını söyler.
+4. **OTA.** Sürümü değiştirip ikinci bir build al, tünelden yükle, log'da
+   `ON TRIAL` → `confirmed` geçişini izle.
+5. **Geri almayı da dene**, çünkü denenmemiş bir emniyet kemeri emniyet kemeri
+   değildir: `CONTROL_HOST`'u olmayan bir ada çevirip derle ve yükle. Netmap hiç
+   gelmez, imaj kendini onaylamaz; elle yeniden başlattığında önyükleyici eski
+   slota dönmeli ve sayfa "en son yüklenen yazılım kendini onaylayamadı"
+   demeli.
+6. **Köyde.** Oradaki ağ farklı bir aralıktaysa cihaz yeni rotayı kendisi ilan
+   eder, ama panelde **tekrar onaylanması** gerekir.
 
 Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
 Hız beklentisi 1-3 Mbps.
@@ -324,8 +350,9 @@ idf.py -p /dev/cu.usbserial-0001 flash monitor
 ayarı sessizce uygulanmaz — o yüzden `ota.c` ile `tun.c`'ye birer `#error`
 kondu: eksik ayarla derleme, sebebini ve çözümünü söyleyerek durur.
 
-Uygulama 1920 KB'a sığmak zorunda. Sığmazsa derleme yüksek sesle patlar; o da
-kablo elindeyken olacağı için sorun değil.
+Slot başına 1920 KB var, en son ölçülen firmware 1.06 MB: ~860 KB pay.
+Sığmazsa derleme yüksek sesle patlar, o da kablo elindeyken olacağı için
+sorun değil.
 
 ### Sonraki her güncelleme tünelden
 
@@ -449,6 +476,15 @@ include/ts_path.h         src/ts_path.c          yol keşfi ve seçimi
 include/ts_client.h       src/ts_client.c        cihaz durum makinesi
 include/ts_control.h      src/ts_control.c       upgrade + handshake + /machine/*
 
+firmware/main/main.c                             açılış sırası + kontrol görevi
+firmware/main/net.c, portal.c                    WiFi, kurulum portalı, durum sayfası
+firmware/main/magic.c                            UDP socket, DISCO, WireGuard sürücüsü
+firmware/main/derp_task.c, tls_io.c              röle bağlantısı
+firmware/main/tun.c                              lwIP arayüzü + NAPT (subnet routing)
+firmware/main/ota.c                              tünelden güncelleme + geri alma
+firmware/main/peers.c, device_nvs.c              peer tablosu, kalıcı kimlik
+firmware/partitions.csv                          iki app slotu + otadata
+
 host/sim_net.c                                   sahte UDP ağı + sahte NAT'lar
 host/posix_io.c                                  TEK platforma özgü dosya
 host/*_test.c, host/h2_probe.c                   test ve teşhis
@@ -496,7 +532,7 @@ Bütün ölçümler bu çipte alındı ve aşağıdaki her şey bu kartta çalı
 
 | | |
 |---|---|
-| Flash | **4 MB** — `partitions.csv` uygulamaya 2 MB veriyor, derlenen firmware 1.06 MB. 2 MB'lık bir modülde bölüm tablosunu küçültmen gerekir. |
+| Flash | **4 MB** — `partitions.csv` OTA için iki app slotu veriyor, her biri 1920 KB; derlenen firmware 1.06 MB. 2 MB'lık bir modülde iki slot sığmaz: tek slotlu bir tabloya dönmen ve OTA'dan vazgeçmen gerekir. |
 | RAM | PSRAM gerekmiyor. Her şey ayaktayken ~97 KB heap boş kalıyor. |
 | WiFi | 2.4 GHz. Kurulum portalı için AP+STA modu kullanılıyor. |
 | ESP-IDF | v5.3.1 ile geliştirildi ve test edildi. |
