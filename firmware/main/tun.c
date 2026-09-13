@@ -3,6 +3,7 @@
 #include "lwip/tcpip.h"
 #include "lwip/ip4.h"
 #include "lwip/pbuf.h"
+#include "lwip/lwip_napt.h"
 #include "esp_log.h"
 #include "tun.h"
 
@@ -89,6 +90,24 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
         ESP_LOGI(TAG, "interface up: %u.%u.%u.%u/10, mtu %d",
                  b[0], b[1], b[2], b[3], TUN_MTU);
     }
+
+    // Masquerading goes on THIS interface, not on the Wi-Fi one, and the
+    // difference is the whole feature. esp-lwip translates a forwarded packet
+    // only when the interface it arrived on carries the flag and the one it
+    // leaves by does not: ip4_forward wraps the call in `if (!netif->napt)`
+    // with netif the outgoing interface, and ip_napt_forward itself opens with
+    // `if (!inp->napt) return ERR_OK`. Traffic for the LAN arrives here, so
+    // the flag belongs here; the new source address is then taken from the
+    // outgoing interface, which is what lets a LAN machine that has never
+    // heard of a tailnet reply to an address on its own network.
+    //
+    // Setting it on the Wi-Fi side does not merely fail to help - it is the
+    // one value that suppresses the translation altogether, and it
+    // masquerades the LAN's own traffic into the tailnet instead: the
+    // opposite direction, which is not what a subnet router is for.
+    ip_napt_enable(our_ip_be, 1);
+    ESP_LOGI(TAG, "NAPT on the tunnel side; forwarded packets will leave "
+                  "as if they came from this device");
     return 0;
 }
 

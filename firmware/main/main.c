@@ -29,7 +29,6 @@
 #include "magic.h"
 #include "derp_task.h"
 #include "tun.h"
-#include "lwip/lwip_napt.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
@@ -72,8 +71,7 @@ static volatile bool s_push_wanted;
 static uint32_t s_last_push_ms;
 static char s_local_ep[32];      // 192.168.x.y:41641
 static char s_route[24];         // the LAN we offer to route for
-static bool s_napt_on;
-static uint32_t s_napt_addr;     // the address NAPT currently rewrites to
+static uint32_t s_lan_addr;      // the address the route below was derived from
 static int s_route_approved = -1;   // -1 until a netmap restates our own record
 static char s_public_ep[52];     // what STUN told us, if anything
 
@@ -466,7 +464,7 @@ static void apply_lan_config(void) {
     int prefix = 0;
 
     if (!nif || esp_netif_get_ip_info(nif, &ip) != ESP_OK || !ip.ip.addr) return;
-    if (s_napt_on && ip.ip.addr == s_napt_addr) return;     // same address, nothing to redo
+    if (s_lan_addr == ip.ip.addr) return;          // same address, nothing to redo
 
     host_order = ntohl(ip.ip.addr);
     mask = ntohl(ip.netmask.addr);
@@ -492,15 +490,14 @@ static void apply_lan_config(void) {
     ESP_LOGI(TAG, "local network %s (this device is %u.%u.%u.%u)",
              s_route, v4[0], v4[1], v4[2], v4[3]);
 
-    // Masquerade forwarded packets as coming from this device, so a
-    // LAN machine that knows nothing about the tailnet still knows
-    // where to send its replies.
-    if (s_napt_on) ip_napt_enable(s_napt_addr, 0);
-    ip_napt_enable(ip.ip.addr, 1);
-    s_napt_addr = ip.ip.addr;
-    s_napt_on = true;
-    ESP_LOGI(TAG, "subnet routing ready for %s "
-                  "(approve the route in the admin console)", s_route);
+    // Masquerading lives on the tunnel interface, not here - see tun_start()
+    // for why that is the only side it can live on. Nothing about it needs
+    // redoing when the router hands out a different address either: lwIP takes
+    // the address it rewrites to from the outgoing interface at forward time,
+    // which is this one, whatever it happens to be by then.
+    s_lan_addr = ip.ip.addr;
+    ESP_LOGI(TAG, "offering %s as a route "
+                  "(approve it in the admin console)", s_route);
 
     // Peers were handed our old address and the old route. Neither is true
     // any more, so say so now rather than at the next sixty-second tick.

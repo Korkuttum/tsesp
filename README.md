@@ -20,7 +20,7 @@ harness'ında hem ESP-IDF firmware'inde derlenir.
 | 8 | DERP rölesi (TLS) — varlık **ve** veri | ✅ doğrudan yol kapalıyken test edildi |
 | 9 | WireGuard (Noise IKpsk2) | ✅ gerçek Tailscale düğümleriyle tünel |
 | 10 | lwIP arayüzü — cihaz kendi 100.x adresinde | ✅ ping %0 kayıp, sayfa tünelden |
-| 11 | NAPT subnet routing | ✅ kod hazır, **rota onayı + saha testi bekliyor** |
+| 11 | NAPT subnet routing | ⚠️ NAPT yanlış arayüzdeydi, düzeltildi; **karta yazılıp denenmesi bekliyor** |
 | 12 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ✅ |
 
 Zincirin tamamı kartta çalışıyor:
@@ -57,6 +57,56 @@ Kod tarafında bitmemiş bir şey yok; eksik olan **saha testi**:
 Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
 Hız beklentisi 1-3 Mbps.
 
+### NAPT yanlış arayüzdeydi
+
+Sahada ilk deneme: cihazın kendi `100.x` adresine ping gidiyor, ev ağındaki
+hiçbir adrese gitmiyor, log'da tek satır yok. Kart elde olmadan, sadece kod
+ve esp-lwip kaynağı okunarak bulundu.
+
+`ip_napt_enable(addr, 1)` bir adresi değil bir **arayüzü** işaretliyor, ve
+esp-lwip'te bayrağın anlamı "kaynağı bu adrese çevir" değil, "bu arayüzden
+*gelen* trafiği çevir":
+
+```c
+/* ip4_forward() - netif çıkış arayüzü */
+if (!netif->napt) {
+    if (ip_napt_forward(p, iphdr, inp, netif) != ERR_OK) return;
+}
+
+/* ip_napt_forward() */
+if (!inp->napt) return ERR_OK;
+...
+ip_napt_modify_addr(iphdr, &iphdr->src, ip_2_ip4(&outp->ip_addr)->addr);
+```
+
+Yani çeviri yalnızca **girdiği** arayüzde bayrak varsa ve **çıktığı**
+arayüzde yoksa yapılıyor; yeni kaynak adresi de çıkış arayüzünden
+okunuyor. Bayrak WiFi arayüzüne konmuştu — tailnet'ten gelip LAN'a çıkan
+paket için çıkış arayüzü tam olarak o, yani `if (!netif->napt)` koşulu
+çeviriyi **bastırıyordu**. Paket ev ağına `100.x` kaynak adresiyle
+çıkıyor, hedef cihaz cevabı modeme yolluyor, modemin 100.64/10'a rotası
+olmadığı için cevap orada ölüyordu. İki uçtan da sessiz.
+
+Üstelik yanlış bayrak ters yönü açıyordu: LAN'dan tailnet'e giden trafik
+maskeleniyordu — kimsenin istemediği yön. Doğrusu bayrağın tünel
+arayüzünde olması, ve tek bayrakla iki yön birlikte olmuyor: esp-lwip
+modelinde NAPT'lı arayüz "iç" taraftır. Subnet router'ın iç tarafı
+tailnet'tir.
+
+Bayrak `tun_start()`'a taşındı. Bir yan fayda: NAPT'ın yazdığı adres
+artık hiç yapılandırılmıyor, çıkış arayüzünden alınıyor, yani modem yeni
+bir DHCP adresi verdiğinde yenilenecek bir şey kalmıyor.
+
+Elenen hipotez: "flash'taki sdkconfig eski, `CONFIG_LWIP_IP_FORWARD`
+hiç açılmamış olabilir" (`sdkconfig` .gitignore'da ve ESP-IDF, dosya
+varsa `sdkconfig.defaults`'u okumaz). Olamaz: `ip_napt_enable`'ın
+bildirimi `lwip_napt.h` içinde `#if ESP_LWIP / #if IP_FORWARD /
+#if IP_NAPT` ile sarılı. İkisi kapalı olsaydı firmware derlenip
+linklenemezdi, dolayısıyla karttaki imajda ikisi de açık.
+
+**Denenmedi.** Bu ortamda ESP-IDF yok; düzeltme kaynak okunarak
+çıkarıldı, karta yazılıp bir peer'dan ev ağına ping atılması gerekiyor.
+
 ### Cihazın 100.x adresine ping gidiyor ama ev ağına gitmiyor
 
 Bu, subnet routing'in tipik arızası ve tek bir anlamı var: tünel çalışıyor
@@ -69,7 +119,7 @@ buraya hiç ulaşmıyordur, ya da ulaşıp yanıt dönmüyordur. Durum sayfasın
 |---|---|---|---|
 | onay bekliyor | 0 | 0 | Rota admin panelde onaylanmamış |
 | onaylandı | 0 | 0 | Uzaktaki cihaz rotayı kullanmıyor, ya da adres çakışması |
-| onaylandı | artıyor | 0 | Sorun ev ağındaki hedef cihazda |
+| onaylandı | artıyor | 0 | Hedef cihaz cevap vermiyor — ya da NAPT düzeltmesi karta yazılmamış |
 | onaylandı | artıyor | artıyor | Yol çalışıyor; sorun uygulama/port tarafında |
 
 "Rota onayı" cihazın kendi netmap'inden geliyor: onaylanan rotalar düğümün
