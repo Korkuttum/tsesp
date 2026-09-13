@@ -117,6 +117,22 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
     ip_napt_enable(our_ip_be, 1);
     ESP_LOGI(TAG, "NAPT on the tunnel side; forwarded packets will leave "
                   "as if they came from this device");
+
+    // ip_napt_enable() finds the interface by its address and says nothing at
+    // all when it finds none, so the line above can be a lie. Print what the
+    // flags actually are: exactly one interface should carry napt, and it has
+    // to be this one. Reading it off the stack beats trusting the call.
+    {
+        struct netif *n;
+        for (n = netif_list; n; n = n->next) {
+            uint32_t a = ip4_addr_get_u32(netif_ip4_addr(n));
+            const uint8_t *b = (const uint8_t *)&a;
+            ESP_LOGI(TAG, "  netif %c%c%d  %u.%u.%u.%u  up=%d  napt=%d",
+                     n->name[0], n->name[1], n->num,
+                     b[0], b[1], b[2], b[3],
+                     netif_is_up(n) ? 1 : 0, n->napt ? 1 : 0);
+        }
+    }
     return 0;
 }
 

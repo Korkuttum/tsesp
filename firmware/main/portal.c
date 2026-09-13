@@ -224,9 +224,16 @@ static const char CSS[] =
     "button.danger{background:transparent;border:1px solid var(--line);color:var(--red);"
     "font-size:13px;padding:10px}"
     "button:disabled{opacity:.5}"
-    /* The file picker is the one control the browser draws itself; give it the
-       page's width and colour so it does not look pasted in. */
-    "input[type=file]{width:100%;margin-top:16px;font-size:13px;color:var(--dim)}"
+    /* The browser draws a file input itself, and the generic input rule above
+       gives it a padded, bordered box that iOS Safari then renders the picker
+       inside - clipped, and on a phone effectively invisible. So the input is
+       hidden and this label stands in for it: a control we draw entirely, and
+       one that can show which file was chosen, which the real picker does not
+       do once the page repaints. */
+    ".fpick{display:block;margin-top:16px;padding:13px;border:1px dashed "
+    "var(--line);border-radius:10px;background:var(--card);color:var(--dim);"
+    "font-size:14px;text-align:center;cursor:pointer}"
+    ".fpick.has{color:var(--fg);border-style:solid}"
     "code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:var(--fg)}"
     "a{color:var(--blue);word-break:break-all}"
     "</style>";
@@ -800,7 +807,8 @@ static esp_err_t get_status(httpd_req_t *req) {
             "<div class=cell><div class=k>Sürüm</div><div class=v>%s</div></div>"
             "</div>"
             "%s"
-            "<input type=file id=fw accept='.bin'>"
+            "<label class=fpick for=fw id=fwl>.bin dosyasi sec</label>"
+            "<input type=file id=fw accept='.bin' hidden>"
             "<button id=fwb onclick='up()'>Yükle ve yeniden başlat</button>"
             "<p class=hint id=fws></p>",
             ota_running_slot(),
@@ -834,7 +842,12 @@ static esp_err_t get_status(httpd_req_t *req) {
         // The refresh replaces the panels wholesale, which would throw away a
         // chosen file or a running upload. OB parks it from the moment a file
         // is picked; reloading the page brings the refresh back.
-        "document.addEventListener('change',e=>{if(e.target.id=='fw')window.OB=1});"
+        /* Picking a file also pauses the four-second repaint below, which would
+           otherwise replace the label and lose the name the moment it is set. */
+        "document.addEventListener('change',e=>{if(e.target.id!='fw')return;"
+        "window.OB=1;const f=e.target.files[0],l=document.getElementById('fwl');"
+        "if(f&&l){l.textContent=f.name+' - '+Math.round(f.size/1024)+' KB';"
+        "l.classList.add('has')}});"
         "setInterval(async()=>{if(window.OB)return;try{"
         "const r=await fetch('/',{cache:'no-store'});"
         "const d=new DOMParser().parseFromString(await r.text(),'text/html');"
