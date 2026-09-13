@@ -37,4 +37,10 @@ void tun_route_stats(uint32_t *fwd_in, uint32_t *fwd_out, uint32_t *too_big);
 // had no route for, `drop` those it discarded.
 void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop);
 
+// What the Wi-Fi interface itself saw. `hooked` says the watch is installed
+// at all - without it the other two are silence, not evidence. `untranslated`
+// counts forwarded packets that left still carrying a tailnet source, and
+// `replies` answers from a LAN web server on their way back.
+void tun_trace_stats(bool *hooked, uint32_t *untranslated, uint32_t *replies);
+
 #endif

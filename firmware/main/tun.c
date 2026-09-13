@@ -5,6 +5,8 @@
 #include "lwip/pbuf.h"
 #include "lwip/lwip_napt.h"
 #include "lwip/stats.h"
+#include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_log.h"
 #include "tun.h"
 
@@ -32,7 +34,67 @@ static uint32_t     s_our_ip;        // our own tailnet address, network order
 // reply never comes back - and both look identical from outside, which is
 // "ping does not work" with nothing in the log to say which half is broken.
 // These three counters separate them.
-static uint32_t     s_trace_in, s_trace_out;
+static uint32_t     s_trace_in, s_trace_out, s_trace_wifi;
+static struct netif *s_sta_netif;
+static uint32_t     s_sta_ip;
+static uint32_t     s_trace_back, s_wifi_replies, s_untranslated;
+static bool         s_hooked;
+static err_t (*s_sta_input)(struct pbuf *, struct netif *);
+static err_t (*s_sta_output)(struct netif *, struct pbuf *, const ip4_addr_t *);
+
+// Every packet the Wi-Fi interface is asked to send, after NAPT has had its
+// say. A forwarded packet still carrying a 100.x source is one the rewrite
+// did not touch, and the LAN machine that receives it will answer to an
+// address its router cannot reach.
+// Replies coming back off the LAN, before lwIP has looked at them. A web
+// server answering a forwarded request sends from port 80, which is exactly
+// what distinguishes it from this device's own conversations.
+static err_t sta_input_trace(struct pbuf *p, struct netif *netif) {
+    if (p->len >= 40) {
+        const uint8_t *h = (const uint8_t *)p->payload;
+        const uint8_t *ip = h;
+        // esp_netif hands ethernet frames in; step over the header when present.
+        if (netif->flags & NETIF_FLAG_ETHARP) {
+            if (p->len < 54 || h[12] != 0x08 || h[13] != 0x00) goto out;
+            ip = h + 14;
+        }
+        if ((ip[0] >> 4) == 4 && ip[9] == 6) {
+            const uint8_t *tcp = ip + ((ip[0] & 0x0f) * 4);
+            uint16_t sport = (uint16_t)((tcp[0] << 8) | tcp[1]);
+            if (sport == 80 && s_trace_back < 15) {
+                s_trace_back++;
+                s_wifi_replies++;
+                ESP_LOGE(TAG, "WIFI-IN  %u.%u.%u.%u:80 -> %u.%u.%u.%u  "
+                              "(a LAN server answered)",
+                         ip[12], ip[13], ip[14], ip[15],
+                         ip[16], ip[17], ip[18], ip[19]);
+            }
+        }
+    }
+out:
+    return s_sta_input(p, netif);
+}
+
+static err_t sta_output_trace(struct netif *netif, struct pbuf *p,
+                              const ip4_addr_t *dst) {
+    // Only packets this device did not originate. Its own traffic carries the
+    // station's address as source and would fill the budget in a second
+    // without saying anything; a forwarded one whose source is still 100.x is
+    // the whole question.
+    if (s_trace_wifi < 25 && p->len >= 20) {
+        const uint8_t *h = (const uint8_t *)p->payload;
+        uint32_t src;
+        memcpy(&src, h + 12, 4);
+        if ((h[0] >> 4) == 4 && src != s_sta_ip) {
+            s_trace_wifi++;
+            s_untranslated++;
+            ESP_LOGE(TAG, "WIFI-OUT %u.%u.%u.%u -> %u.%u.%u.%u proto=%u"
+                          "   <-- source not rewritten",
+                     h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], h[9]);
+        }
+    }
+    return s_sta_output(netif, p, dst);
+}
 static uint32_t     s_fwd_in;        // arrived for some address that is not ours
 static uint32_t     s_fwd_out;       // left here on behalf of a LAN address
 static uint32_t     s_too_big;       // dropped: longer than the tunnel MTU
@@ -128,6 +190,26 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
     // one value that suppresses the translation altogether, and it
     // masquerades the LAN's own traffic into the tailnet instead: the
     // opposite direction, which is not what a subnet router is for.
+    // Wrap the Wi-Fi interface's output so we can see a forwarded packet as it
+    // finally leaves. ip4_forward runs the NAPT rewrite and only then calls
+    // netif->output, so this is the first and only place the source address
+    // the LAN will actually see can be read. Everything upstream of here is
+    // what we *intended* to send.
+    {
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        struct netif *n = sta ? (struct netif *)esp_netif_get_netif_impl(sta) : NULL;
+        if (n && !s_sta_output) {
+            s_sta_netif = n;
+            s_sta_ip = ip4_addr_get_u32(netif_ip4_addr(n));
+            s_sta_output = n->output;
+            n->output = sta_output_trace;
+            s_sta_input = n->input;
+            n->input = sta_input_trace;
+            s_hooked = true;
+            ESP_LOGI(TAG, "watching both directions on the wifi side");
+        }
+    }
+
     ip_napt_enable(our_ip_be, 1);
     ESP_LOGI(TAG, "NAPT on the tunnel side; forwarded packets will leave "
                   "as if they came from this device");
@@ -202,6 +284,12 @@ bool tun_is_up(void) { return s_up; }
 void tun_stats(uint32_t *in, uint32_t *out) {
     if (in) *in = s_in;
     if (out) *out = s_out;
+}
+
+void tun_trace_stats(bool *hooked, uint32_t *untranslated, uint32_t *replies) {
+    if (hooked) *hooked = s_hooked;
+    if (untranslated) *untranslated = s_untranslated;
+    if (replies) *replies = s_wifi_replies;
 }
 
 void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop) {
