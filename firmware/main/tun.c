@@ -38,6 +38,10 @@ static uint32_t     s_trace_in, s_trace_out, s_trace_wifi;
 static struct netif *s_sta_netif;
 static uint32_t     s_sta_ip;
 static uint32_t     s_trace_back, s_wifi_replies, s_untranslated;
+static uint32_t     s_wifi_out_total, s_wifi_out_lan, s_gw_ip;
+static uint32_t     s_fwd_dst_ip, s_fwd_reached_wifi, s_fwd_answered;
+static uint32_t     s_port_log, s_port_log_in;
+static uint16_t     s_fwd_dst_port;
 static bool         s_hooked;
 static err_t (*s_sta_input)(struct pbuf *, struct netif *);
 static err_t (*s_sta_output)(struct netif *, struct pbuf *, const ip4_addr_t *);
@@ -61,6 +65,23 @@ static err_t sta_input_trace(struct pbuf *p, struct netif *netif) {
         if ((ip[0] >> 4) == 4 && ip[9] == 6) {
             const uint8_t *tcp = ip + ((ip[0] & 0x0f) * 4);
             uint16_t sport = (uint16_t)((tcp[0] << 8) | tcp[1]);
+            {
+                // The mirror of "Hedefe ulaşan": a packet coming back from
+                // the exact machine the last forwarded one went to. Together
+                // the two say whether the target answered at all, which is
+                // the question a packet capture on the LAN would answer.
+                uint32_t srcip;
+                memcpy(&srcip, ip + 12, 4);
+                if (srcip == s_fwd_dst_ip) {
+                    s_fwd_answered++;
+                    if (s_port_log_in < 4) {
+                        s_port_log_in++;
+                        ESP_LOGW(TAG, "NAT-IN  from %u.%u.%u.%u:%u  dport=%u",
+                                 ip[12], ip[13], ip[14], ip[15], (unsigned)sport,
+                                 (unsigned)((tcp[2] << 8) | tcp[3]));
+                    }
+                }
+            }
             if (sport == 80 && s_trace_back < 15) {
                 s_trace_back++;
                 s_wifi_replies++;
@@ -81,6 +102,43 @@ static err_t sta_output_trace(struct netif *netif, struct pbuf *p,
     // station's address as source and would fill the budget in a second
     // without saying anything; a forwarded one whose source is still 100.x is
     // the whole question.
+    s_wifi_out_total++;
+    // A packet bound for another machine on this LAN - which is what a
+    // forwarded one is. Counting only the untranslated ones left "zero"
+    // meaning either "all were rewritten" or "none ever got here", and those
+    // are not the same answer.
+    if (p->len >= 20) {
+        const uint8_t *h = (const uint8_t *)p->payload;
+        uint32_t dstip;
+        memcpy(&dstip, h + 16, 4);
+        if ((h[0] >> 4) == 4 && dstip != s_sta_ip && dstip != s_gw_ip &&
+            (dstip & 0x00ffffff) == (s_sta_ip & 0x00ffffff)) {
+            // Counter only. This runs on the lwIP thread, and a log line per
+            // forwarded packet writes to a UART from there - slow enough to
+            // stall the stack and trip the watchdog. That is what rolled the
+            // last image back.
+            s_wifi_out_lan++;
+            // The flow we are actually trying to forward, matched on both
+            // address and port. Counting LAN-bound packets alone mixed in this
+            // device's own HTTP replies and could not tell them apart.
+            if (dstip == s_fwd_dst_ip && h[9] == 6 && p->len >= 24) {
+                const uint8_t *tcp = h + ((h[0] & 0x0f) * 4);
+                if ((uint16_t)((tcp[2] << 8) | tcp[3]) == s_fwd_dst_port) {
+                    s_fwd_reached_wifi++;
+                    // The source port NAPT picked. The reply will come back
+                    // addressed to it, and the table is looked up by it, so
+                    // this is the number that has to match below.
+                    if (s_port_log < 4) {
+                        s_port_log++;
+                        ESP_LOGW(TAG, "NAT-OUT sport=%u -> %u.%u.%u.%u:%u",
+                                 (unsigned)((tcp[0] << 8) | tcp[1]),
+                                 h[16], h[17], h[18], h[19],
+                                 (unsigned)s_fwd_dst_port);
+                    }
+                }
+            }
+        }
+    }
     if (s_trace_wifi < 25 && p->len >= 20) {
         const uint8_t *h = (const uint8_t *)p->payload;
         uint32_t src;
@@ -201,6 +259,7 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
         if (n && !s_sta_output) {
             s_sta_netif = n;
             s_sta_ip = ip4_addr_get_u32(netif_ip4_addr(n));
+            s_gw_ip = ip4_addr_get_u32(netif_ip4_gw(n));
             s_sta_output = n->output;
             n->output = sta_output_trace;
             s_sta_input = n->input;
@@ -252,6 +311,13 @@ void tun_input(const uint8_t *ip_packet, size_t len) {
         if (dst != s_our_ip) {
             const uint8_t *s = (const uint8_t *)&src, *d = (const uint8_t *)&dst;
             s_fwd_in++;
+            // Remember where this one was going, so the Wi-Fi side can say
+            // whether it ever got there.
+            if (ip_packet[9] == 6 && len >= 24) {
+                const uint8_t *tcp = ip_packet + ((ip_packet[0] & 0x0f) * 4);
+                s_fwd_dst_ip = dst;
+                s_fwd_dst_port = (uint16_t)((tcp[2] << 8) | tcp[3]);
+            }
             if (s_trace_in < 40) {
                 s_trace_in++;
                 ESP_LOGW(TAG, "TS->LAN %u.%u.%u.%u -> %u.%u.%u.%u proto=%u len=%u",
@@ -291,6 +357,14 @@ void tun_trace_stats(bool *hooked, uint32_t *untranslated, uint32_t *replies) {
     if (untranslated) *untranslated = s_untranslated;
     if (replies) *replies = s_wifi_replies;
 }
+
+void tun_wifi_out(uint32_t *total, uint32_t *to_lan) {
+    if (total) *total = s_wifi_out_total;
+    if (to_lan) *to_lan = s_wifi_out_lan;
+}
+
+uint32_t tun_fwd_reached_wifi(void) { return s_fwd_reached_wifi; }
+uint32_t tun_fwd_answered(void)     { return s_fwd_answered; }
 
 void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop) {
 #if LWIP_STATS && IP_STATS

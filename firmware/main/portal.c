@@ -596,6 +596,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     uint32_t ip_fw = 0, ip_rterr = 0, ip_drop = 0;
     uint32_t tr_untrans = 0, tr_replies = 0;
     bool tr_hooked = false;
+    uint32_t wo_total = 0, wo_lan = 0, fwd_wifi = 0, fwd_ans = 0;
     char arp[240];
     esp_chip_info_t chip;
     uint32_t flash = 0;
@@ -615,6 +616,9 @@ static esp_err_t get_status(httpd_req_t *req) {
     tun_route_stats(&fwd_in, &fwd_out, &fwd_big);
     tun_ip_stats(&ip_fw, &ip_rterr, &ip_drop);
     tun_trace_stats(&tr_hooked, &tr_untrans, &tr_replies);
+    tun_wifi_out(&wo_total, &wo_lan);
+    fwd_wifi = tun_fwd_reached_wifi();
+    fwd_ans = tun_fwd_answered();
 
     // Who this device has actually exchanged a frame with on the LAN. An
     // address here answered an ARP request, so it exists and is reachable at
@@ -720,6 +724,10 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Wi-Fi izleyici</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Çevrilmemiş çıkan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>LAN'dan dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Wi-Fi'dan giden</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Bunun LAN'a gideni</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Hedefe ulaşan</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Hedefin cevabı</div><div class=v>%u<small> paket</small></div></div>"
         "</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
@@ -741,6 +749,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)ip_fw, (unsigned)ip_rterr, (unsigned)ip_drop, arp,
         tr_hooked ? "kurulu" : "KURULAMADI",
         (unsigned)tr_untrans, (unsigned)tr_replies,
+        (unsigned)wo_total, (unsigned)wo_lan, (unsigned)fwd_wifi, (unsigned)fwd_ans,
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
         (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);

@@ -43,4 +43,19 @@ void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop);
 // `replies` answers from a LAN web server on their way back.
 void tun_trace_stats(bool *hooked, uint32_t *untranslated, uint32_t *replies);
 
+// Everything the Wi-Fi interface was asked to send, and the part of it aimed
+// at another machine on this LAN. The second is what a forwarded packet looks
+// like from here, and zero means it never reached the interface at all.
+void tun_wifi_out(uint32_t *total, uint32_t *to_lan);
+
+// Packets that left the Wi-Fi interface for the same address and port the
+// last forwarded packet was aimed at. This is the forwarded flow itself,
+// separated from this device's own traffic to the same machine.
+uint32_t tun_fwd_reached_wifi(void);
+
+// Packets that came back from that same machine. Zero against a non-zero
+// tun_fwd_reached_wifi() means the target never answered; both non-zero moves
+// the fault to what happens to the answer here.
+uint32_t tun_fwd_answered(void);
+
 #endif
