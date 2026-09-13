@@ -9,6 +9,8 @@
 #include "esp_netif_net_stack.h"
 #include "esp_log.h"
 #include "tun.h"
+#include "nat.h"
+#include "esp_timer.h"
 
 // Both options come from sdkconfig.defaults, which ESP-IDF reads only when it
 // creates sdkconfig - so a build tree from before they were added drops them
@@ -41,6 +43,18 @@ static uint32_t     s_trace_back, s_wifi_replies, s_untranslated;
 static uint32_t     s_wifi_out_total, s_wifi_out_lan, s_gw_ip;
 static uint32_t     s_fwd_dst_ip, s_fwd_reached_wifi, s_fwd_answered;
 static uint32_t     s_port_log, s_port_log_in;
+static uint32_t     s_csum_bad_in, s_csum_bad_out;
+static uint32_t     s_input_calls;
+static uint32_t     s_out_err_log;
+static nat_table    s_nat;
+// The reverse path rewrites in place, and a received pbuf can point straight
+// at driver memory. This runs only in the Wi-Fi receive task, so one buffer
+// is enough and it is not on anybody's stack.
+static uint8_t      s_rx[1600];
+static uint32_t     s_fwd_in;        // arrived for some address that is not ours
+static uint32_t     s_fwd_out;       // left here on behalf of a LAN address
+
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint16_t     s_fwd_dst_port;
 static bool         s_hooked;
 static err_t (*s_sta_input)(struct pbuf *, struct netif *);
@@ -54,6 +68,9 @@ static err_t (*s_sta_output)(struct netif *, struct pbuf *, const ip4_addr_t *);
 // server answering a forwarded request sends from port 80, which is exactly
 // what distinguishes it from this device's own conversations.
 static err_t sta_input_trace(struct pbuf *p, struct netif *netif) {
+    // Unconditional: proves the hook itself fires, independent of anything
+    // this function goes on to parse.
+    s_input_calls++;
     if (p->len >= 40) {
         const uint8_t *h = (const uint8_t *)p->payload;
         const uint8_t *ip = h;
@@ -92,6 +109,27 @@ static err_t sta_input_trace(struct pbuf *p, struct netif *netif) {
             }
         }
     }
+    // The answer to something we forwarded. lwIP would see this device's own
+    // address in the destination, accept it locally and drop it; instead put
+    // the peer's address back and hand it straight to the tunnel.
+    if (s_sta_ip && p->len >= 20 && p->len <= sizeof(s_rx)) {
+        const uint8_t *h = (const uint8_t *)p->payload;
+        size_t off = (netif->flags & NETIF_FLAG_ETHARP) ? 14 : 0;
+        if (p->len > off + 20 && (h[off] >> 4) == 4) {
+            uint16_t iplen = (uint16_t)(p->len - off);
+            uint32_t peer = 0;
+            memcpy(s_rx, h + off, iplen);
+            if (nat_in(&s_nat, s_rx, iplen, s_sta_ip, now_ms(), &peer)) {
+                if (s_send) {
+                    s_send(s_rx, iplen, peer);
+                    s_out++;
+                    s_fwd_out++;
+                }
+                pbuf_free(p);
+                return ERR_OK;
+            }
+        }
+    }
 out:
     return s_sta_input(p, netif);
 }
@@ -125,15 +163,31 @@ static err_t sta_output_trace(struct netif *netif, struct pbuf *p,
                 const uint8_t *tcp = h + ((h[0] & 0x0f) * 4);
                 if ((uint16_t)((tcp[2] << 8) | tcp[3]) == s_fwd_dst_port) {
                     s_fwd_reached_wifi++;
-                    // The source port NAPT picked. The reply will come back
-                    // addressed to it, and the table is looked up by it, so
-                    // this is the number that has to match below.
+                    // The source port NAPT picked, and the packet as it will
+                    // actually appear on the wire - flags, header lengths,
+                    // whatever a strict TCP stack might object to.
                     if (s_port_log < 4) {
+                        size_t k, hl2 = (size_t)(h[0] & 0x0f) * 4;
+                        size_t thl = (size_t)((tcp[12] >> 4) * 4);
+                        char hex[3 * 96 + 1]; size_t hn = 0;
                         s_port_log++;
-                        ESP_LOGW(TAG, "NAT-OUT sport=%u -> %u.%u.%u.%u:%u",
-                                 (unsigned)((tcp[0] << 8) | tcp[1]),
-                                 h[16], h[17], h[18], h[19],
-                                 (unsigned)s_fwd_dst_port);
+                        // dst is the address netif->output uses for ARP -
+                        // separate from the IP header inside the packet. If
+                        // NAT rewrote the header but this still names the old
+                        // destination, the frame goes out addressed to the
+                        // wrong MAC and nothing on the LAN ever sees it.
+                        {
+                            const uint8_t *da = (const uint8_t *)&dst->addr;
+                            ESP_LOGW(TAG, "NAT-OUT sport=%u -> %u.%u.%u.%u:%u iphl=%u tcphl=%u flags=0x%02x len=%u  ARP-dst=%u.%u.%u.%u",
+                                     (unsigned)((tcp[0] << 8) | tcp[1]),
+                                     h[16], h[17], h[18], h[19],
+                                     (unsigned)s_fwd_dst_port,
+                                     (unsigned)hl2, (unsigned)thl, tcp[13], (unsigned)p->len,
+                                     da[0], da[1], da[2], da[3]);
+                        }
+                        for (k = 0; k < p->len && k < 96 && hn < sizeof(hex) - 3; k++)
+                            hn += snprintf(hex + hn, sizeof(hex) - hn, "%02x", h[k]);
+                        ESP_LOGW(TAG, "NAT-OUT bytes: %s", hex);
                     }
                 }
             }
@@ -151,10 +205,19 @@ static err_t sta_output_trace(struct netif *netif, struct pbuf *p,
                      h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], h[9]);
         }
     }
-    return s_sta_output(netif, p, dst);
+    {
+        // The one thing never checked: whether the driver actually accepted
+        // this packet. ARP not yet resolved, a full TX queue, anything else -
+        // all of it looks identical to a target that silently ignores us
+        // unless the return value is read.
+        err_t rc = s_sta_output(netif, p, dst);
+        if (rc != ERR_OK && s_out_err_log < 8) {
+            s_out_err_log++;
+            ESP_LOGE(TAG, "WIFI-OUT driver refused, err=%d", (int)rc);
+        }
+        return rc;
+    }
 }
-static uint32_t     s_fwd_in;        // arrived for some address that is not ours
-static uint32_t     s_fwd_out;       // left here on behalf of a LAN address
 static uint32_t     s_too_big;       // dropped: longer than the tunnel MTU
 static bool         s_logged_first_fwd;
 
@@ -269,7 +332,15 @@ int tun_start(uint32_t our_ip_be, tun_send_fn send) {
         }
     }
 
-    ip_napt_enable(our_ip_be, 1);
+    // esp-lwip's NAPT is deliberately left off. Its forward half worked and
+    // its reverse half did not: the answer came back, was not recognised as
+    // belonging to a mapping, kept this device's address and was dropped as
+    // if it had been addressed here. Measured on the board, repeatedly. The
+    // table in nat.c does both halves, and can be tested without a phone.
+    // Note: not ip_napt_enable(addr, 0). Disabling what was never enabled
+    // sends esp-lwip into ip_napt_deinit(), which calls mem_free() on a table
+    // it never allocated and asserts. Leaving it alone is the same thing.
+    nat_init(&s_nat);
     ESP_LOGI(TAG, "NAPT on the tunnel side; forwarded packets will leave "
                   "as if they came from this device");
 
@@ -333,9 +404,37 @@ void tun_input(const uint8_t *ip_packet, size_t len) {
         }
     }
 
-    p = pbuf_alloc(PBUF_RAW, (uint16_t)len, PBUF_RAM);
+    // PBUF_LINK, not PBUF_RAW: this packet may be forwarded rather than
+    // delivered locally, and a forwarded packet goes through ip4_forward()
+    // into netif->output() -> ethernet_output(), which needs room before the
+    // payload to prepend a 14-byte Ethernet header. PBUF_RAW leaves none, so
+    // pbuf_add_header() there fails and ethernet_output() returns ERR_BUF -
+    // silently, because nothing upstream of this file checked netif->output's
+    // return value. That is the actual reason every forwarded packet vanished:
+    // it never reached the Wi-Fi driver, not once, all day - both under
+    // esp-lwip's own NAPT and under the one written to replace it. A packet
+    // addressed to this device's own tailnet address never hit this path, so
+    // nothing else here was wrong for that to hide it.
+    p = pbuf_alloc(PBUF_LINK, (uint16_t)len, PBUF_RAM);
     if (!p) return;
     memcpy(p->payload, ip_packet, len);
+
+    // Addressed to the LAN: give it this device's address and a source port of
+    // ours, so the machine that receives it answers to a neighbour it can
+    // reach rather than to a tailnet address its router has never heard of.
+    {
+        uint32_t dstip;
+        memcpy(&dstip, ip_packet + 16, 4);
+        if (len >= 20 && dstip != s_our_ip && s_sta_ip) {
+            uint8_t *q = (uint8_t *)p->payload;
+            // What the phone sent, before we touch it. If this is already
+            // wrong the packet was damaged upstream and no rewrite can save
+            // it; if only the second check fails, the rewrite is the fault.
+            if (!nat_csum_ok(q, len)) s_csum_bad_in++;
+            nat_out(&s_nat, q, len, s_sta_ip, now_ms());
+            if (!nat_csum_ok(q, len)) s_csum_bad_out++;
+        }
+    }
 
     // Posts to the lwIP thread; calling ip_input from here would race.
     if (s_netif.input(p, &s_netif) != ERR_OK) {
@@ -365,6 +464,20 @@ void tun_wifi_out(uint32_t *total, uint32_t *to_lan) {
 
 uint32_t tun_fwd_reached_wifi(void) { return s_fwd_reached_wifi; }
 uint32_t tun_fwd_answered(void)     { return s_fwd_answered; }
+
+uint32_t tun_input_calls(void) { return s_input_calls; }
+
+void tun_csum_bad(uint32_t *before, uint32_t *after) {
+    if (before) *before = s_csum_bad_in;
+    if (after) *after = s_csum_bad_out;
+}
+
+void tun_nat_stats(uint32_t *out, uint32_t *back, uint32_t *unmatched, int *live) {
+    if (out) *out = s_nat.rewrites_out;
+    if (back) *back = s_nat.rewrites_in;
+    if (unmatched) *unmatched = s_nat.misses_in;
+    if (live) *live = nat_live(&s_nat, now_ms());
+}
 
 void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop) {
 #if LWIP_STATS && IP_STATS

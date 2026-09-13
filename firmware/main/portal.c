@@ -597,6 +597,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     uint32_t tr_untrans = 0, tr_replies = 0;
     bool tr_hooked = false;
     uint32_t wo_total = 0, wo_lan = 0, fwd_wifi = 0, fwd_ans = 0;
+    uint32_t nat_o = 0, nat_i = 0, nat_miss = 0, cb_in = 0, cb_out = 0, in_calls = 0; int nat_n = 0;
     char arp[240];
     esp_chip_info_t chip;
     uint32_t flash = 0;
@@ -619,6 +620,9 @@ static esp_err_t get_status(httpd_req_t *req) {
     tun_wifi_out(&wo_total, &wo_lan);
     fwd_wifi = tun_fwd_reached_wifi();
     fwd_ans = tun_fwd_answered();
+    tun_nat_stats(&nat_o, &nat_i, &nat_miss, &nat_n);
+    tun_csum_bad(&cb_in, &cb_out);
+    in_calls = tun_input_calls();
 
     // Who this device has actually exchanged a frame with on the LAN. An
     // address here answered an ARP request, so it exists and is reachable at
@@ -728,6 +732,13 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Bunun LAN'a gideni</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Hedefe ulaşan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Hedefin cevabı</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Çeviri: giden</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Çeviri: dönen</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Eşleşmeyen dönen</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Açık eşleme</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>Bozuk gelen</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Çeviri bozdu</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Giriş kancası çalıştı</div><div class=v>%u<small> kez</small></div></div>"
         "</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
@@ -750,6 +761,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         tr_hooked ? "kurulu" : "KURULAMADI",
         (unsigned)tr_untrans, (unsigned)tr_replies,
         (unsigned)wo_total, (unsigned)wo_lan, (unsigned)fwd_wifi, (unsigned)fwd_ans,
+        (unsigned)nat_o, (unsigned)nat_i, (unsigned)nat_miss, nat_n,
+        (unsigned)cb_in, (unsigned)cb_out, (unsigned)in_calls,
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
         (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);

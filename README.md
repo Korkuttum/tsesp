@@ -283,6 +283,34 @@ ilk beş dakika devre dışı bırakıyordu). Doğrulaması kolay: modemi kapat,
 kartı yeniden başlat, portalın açılmasını bekle, modemi aç — beş dakika
 içinde kendiliğinden dönmeli.
 
+### Subnet routing: paket hiç kablodan çıkmıyordu
+
+Rota onaylandı, NAPT bayrağı doğru arayüzdeydi, çeviri sağlaması doğruydu —
+ve yine de tünelden geçen hiçbir istek ev ağındaki bir cihaza ulaşmıyordu.
+Saatlerce süren ölçüm zinciri ("Gelen istek" → "Ağa çıkarılan" → "Hedefe
+ulaşan") her aşamada pozitif görünüyordu, ama gerçek bir hedeften tek bir
+bayt bile geri gelmiyordu.
+
+Kök sebep esp-lwip'te değil, `tun_input()`'un kendi pbuf ayırma çağrısındaydı:
+`pbuf_alloc(PBUF_RAW, ...)`, Ethernet header'ı için pbuf'ın başında hiç yer
+bırakmıyor. Cihazın kendi tailnet adresine gelen paket sorun çıkarmıyordu,
+çünkü o `ip4_input`'ta yerelden teslim ediliyor, `netif->output` hiç
+çağrılmıyor. Ama **her yönlendirilen paket** `ip4_forward → netif->output →
+ethernet_output` yoluna giriyor, orada 14 baytlık Ethernet header eklenmeye
+çalışılıyor (`pbuf_add_header`), yer olmadığı için başarısız oluyor,
+`ERR_BUF` dönüyor — ve hiçbir çağıran bu dönüş değerine bakmadığı için paket
+sessizce kayboluyordu. WiFi çipine hiç ulaşmadan.
+
+Bu, hem sabahki esp-lwip NAPT denemesinde hem öğleden sonra yazılan kendi
+NAT katmanında (`src/nat.c`) aynı köşede gizliydi — ikisi de doğru
+çalışıyordu, ikisinin de teslim edecek yolu yoktu. "Ağa çıkarılan" sayacının
+pozitif çıkmasının sebebi de buydu: `netif->output`'un dönüş kodu hiç
+okunmuyordu, paket "gönderildi" sanılıyordu.
+
+Düzeltme tek satır: `PBUF_RAW` → `PBUF_LINK`. Kartta doğrulandı — üç ayrı
+LAN hedefine (extender, IoT cihazı) tünelden istek gitti, cevap döndü,
+sayfa açıldı.
+
 ### WireGuard: rekey tüneli kesiyordu
 
 Kart günlüğünde `wireguard type 4 ... rejected (-1)` satırları göze çarptı.

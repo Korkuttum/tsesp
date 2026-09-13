@@ -58,4 +58,19 @@ uint32_t tun_fwd_reached_wifi(void);
 // the fault to what happens to the answer here.
 uint32_t tun_fwd_answered(void);
 
+// The translation table itself: packets rewritten on the way out, answers
+// matched on the way back, and answers that arrived addressed to this device
+// but belonged to no mapping. The last one separates "nothing came back" from
+// "something came back and we did not recognise it".
+void tun_nat_stats(uint32_t *out, uint32_t *back, uint32_t *unmatched, int *live);
+
+// Packets whose checksums did not verify: as they arrived from the tunnel,
+// and again after translation. The first blames the sender, the second blames
+// this code.
+void tun_csum_bad(uint32_t *before, uint32_t *after);
+
+// How many times the Wi-Fi input hook itself ran, independent of what it
+// found - the check for whether the hook is even reached.
+uint32_t tun_input_calls(void);
+
 #endif
