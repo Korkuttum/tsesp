@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_wifi.h"
+#include "lwip/etharp.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -577,6 +578,8 @@ static esp_err_t get_status(httpd_req_t *req) {
     int i, n;
     uint32_t pings = 0, pongs = 0, tun_in = 0, tun_out = 0, derp_tx = 0, derp_rx = 0;
     uint32_t fwd_in = 0, fwd_out = 0, fwd_big = 0;
+    uint32_t ip_fw = 0, ip_rterr = 0, ip_drop = 0;
+    char arp[240];
     esp_chip_info_t chip;
     uint32_t flash = 0;
     const esp_partition_t *app = esp_ota_get_running_partition();
@@ -593,6 +596,28 @@ static esp_err_t get_status(httpd_req_t *req) {
     magic_stats(&pings, &pongs);
     tun_stats(&tun_in, &tun_out);
     tun_route_stats(&fwd_in, &fwd_out, &fwd_big);
+    tun_ip_stats(&ip_fw, &ip_rterr, &ip_drop);
+
+    // Who this device has actually exchanged a frame with on the LAN. An
+    // address here answered an ARP request, so it exists and is reachable at
+    // layer 2; one that answers ARP but nothing above it is being filtered,
+    // not absent. An empty list means the Wi-Fi is isolating its clients, and
+    // no amount of routing code will help.
+    {
+        size_t i;
+        int n = 0;
+        arp[0] = '\0';
+        for (i = 0; i < ARP_TABLE_SIZE; i++) {
+            ip4_addr_t *ipa = NULL;
+            struct netif *nif = NULL;
+            struct eth_addr *eth = NULL;
+            if (!etharp_get_entry(i, &ipa, &nif, &eth) || !ipa) continue;
+            n += snprintf(arp + n, sizeof(arp) - n, "%s%s", n ? ", " : "",
+                          ip4addr_ntoa(ipa));
+            if ((size_t)n >= sizeof(arp) - 20) break;
+        }
+        if (!arp[0]) snprintf(arp, sizeof(arp), "hicbiri");
+    }
     derp_task_stats(&derp_tx, &derp_rx);
     cpu_load(&core0, &core1);
     esp_chip_info(&chip);
@@ -670,6 +695,10 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Gelen istek</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Boyu aşıp düşen</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Ağa çıkarılan</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Rotası yok</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell><div class=k>Yığında düşen</div><div class=v>%u<small> paket</small></div></div>"
+        "<div class=cell wide><div class=k>Ev ağında görülen cihazlar</div><div class=v>%s</div></div>"
         "</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
@@ -688,6 +717,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         s_status.route_approved > 0 ? "onaylandı" :
             s_status.route_approved == 0 ? "onay bekliyor" : "bilinmiyor",
         (unsigned)fwd_in, (unsigned)fwd_out, (unsigned)fwd_big,
+        (unsigned)ip_fw, (unsigned)ip_rterr, (unsigned)ip_drop, arp,
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
         (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);

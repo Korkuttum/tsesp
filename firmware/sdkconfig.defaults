@@ -24,6 +24,12 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
 
+# lwIP's own IP counters. Our tun counters say a packet arrived and was meant
+# for the LAN; only these say whether the stack then actually put it on the
+# wire (ip.fw), found nowhere to send it (ip.rterr), or threw it away
+# (ip.drop). Without them "forwarded" is an assumption.
+CONFIG_LWIP_STATS=y
+
 # Updating over the tunnel: two app slots (see partitions.csv) and a
 # bootloader that goes back to the previous image when a new one never
 # confirms itself. A box where nobody can press reset must not be one bad

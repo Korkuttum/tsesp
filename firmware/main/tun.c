@@ -4,6 +4,7 @@
 #include "lwip/ip4.h"
 #include "lwip/pbuf.h"
 #include "lwip/lwip_napt.h"
+#include "lwip/stats.h"
 #include "esp_log.h"
 #include "tun.h"
 
@@ -182,6 +183,16 @@ bool tun_is_up(void) { return s_up; }
 void tun_stats(uint32_t *in, uint32_t *out) {
     if (in) *in = s_in;
     if (out) *out = s_out;
+}
+
+void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop) {
+#if LWIP_STATS && IP_STATS
+    if (fw)    *fw    = lwip_stats.ip.fw;
+    if (rterr) *rterr = lwip_stats.ip.rterr;
+    if (drop)  *drop  = lwip_stats.ip.drop;
+#else
+    if (fw) *fw = 0; if (rterr) *rterr = 0; if (drop) *drop = 0;
+#endif
 }
 
 void tun_route_stats(uint32_t *fwd_in, uint32_t *fwd_out, uint32_t *too_big) {

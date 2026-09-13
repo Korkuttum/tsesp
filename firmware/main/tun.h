@@ -32,4 +32,9 @@ void tun_stats(uint32_t *in, uint32_t *out);
 // dropped for being longer than the tunnel MTU.
 void tun_route_stats(uint32_t *fwd_in, uint32_t *fwd_out, uint32_t *too_big);
 
+// lwIP's own view, which is the half our counters cannot see: `fw` counts
+// packets the stack actually forwarded out of an interface, `rterr` those it
+// had no route for, `drop` those it discarded.
+void tun_ip_stats(uint32_t *fw, uint32_t *rterr, uint32_t *drop);
+
 #endif
