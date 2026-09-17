@@ -164,8 +164,15 @@ static const char CSS[] =
        of a scroll back to the top. The radios stay direct children of
        .wrap (siblings of .head and .panels) so the :checked~ rules below
        still reach both of them. */
+    /* Its box starts flush with the very top of the page (cancelling the
+       body's own top padding, then adding it back as padding so the
+       content inside still sits where it did) so there's no gap left to
+       scroll through before it engages - otherwise the header visibly
+       hops up by that gap the first time you scroll, before settling
+       into its stuck position. */
     ".head{position:sticky;top:0;z-index:5;background:var(--bg);"
-    "border-bottom:1px solid var(--line);padding-bottom:2px}"
+    "border-bottom:1px solid var(--line);padding-bottom:2px;"
+    "margin-top:-18px;padding-top:18px}"
     ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
     "border-radius:8px;padding:4px;margin-bottom:14px;overflow-x:auto}"
     ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:6px;"
