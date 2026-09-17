@@ -131,6 +131,13 @@ static const char CSS[] =
     "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
     "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}}"
     "*{box-sizing:border-box}"
+    /* Tabs swap in panels of very different height (Ağ is long, Genel is
+       short), so switching tabs on a desktop browser toggles whether a
+       vertical scrollbar is there at all - and every time it appears or
+       disappears, the page's own width changes by the scrollbar's width,
+       which reads as the whole layout sliding sideways. Reserving the
+       gutter unconditionally keeps the width constant either way. */
+    "html{overflow-y:scroll;scrollbar-gutter:stable}"
     "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:18px 14px 40px;"
     "background:var(--bg);color:var(--fg)}"
     ".wrap{max-width:860px;margin:0 auto}"
@@ -151,15 +158,22 @@ static const char CSS[] =
     ".hero .addr{margin-left:auto;font-family:ui-monospace,Menlo,monospace;"
     "font-size:14px;color:var(--dim)}"
     /* tabs, done with radios so switching needs no script */
-    ".tabs input{position:absolute;opacity:0;pointer-events:none}"
+    "input[name=tab]{position:absolute;opacity:0;pointer-events:none}"
+    /* Everything above the panels stays put while a long tab's content
+       scrolls underneath it, so the tabs are always one tap away instead
+       of a scroll back to the top. The radios stay direct children of
+       .wrap (siblings of .head and .panels) so the :checked~ rules below
+       still reach both of them. */
+    ".head{position:sticky;top:0;z-index:5;background:var(--bg);"
+    "border-bottom:1px solid var(--line);padding-bottom:2px}"
     ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
     "border-radius:8px;padding:4px;margin-bottom:14px;overflow-x:auto}"
     ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:6px;"
     "font-size:14px;color:var(--dim);white-space:nowrap;cursor:pointer}"
     ".panel{display:none}"
-    "#t1:checked~.tabbar label[for=t1],#t2:checked~.tabbar label[for=t2],"
-    "#t3:checked~.tabbar label[for=t3],#t4:checked~.tabbar label[for=t4],"
-    "#t5:checked~.tabbar label[for=t5]{background:var(--blue);color:#fff}"
+    "#t1:checked~.head .tabbar label[for=t1],#t2:checked~.head .tabbar label[for=t2],"
+    "#t3:checked~.head .tabbar label[for=t3],#t4:checked~.head .tabbar label[for=t4],"
+    "#t5:checked~.head .tabbar label[for=t5]{background:var(--blue);color:#fff}"
     "#t1:checked~.panels .p1,#t2:checked~.panels .p2,"
     "#t3:checked~.panels .p3,#t4:checked~.panels .p4,"
     "#t5:checked~.panels .p5{display:block}"
@@ -692,6 +706,10 @@ static esp_err_t get_status(httpd_req_t *req) {
     o += snprintf(page + o, cap - o,
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp</title>%s"
         "<div class=wrap>"
+        "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
+        "<input type=radio name=tab id=t3><input type=radio name=tab id=t4>"
+        "<input type=radio name=tab id=t5>"
+        "<div class=head>"
         "<div class=top><h1>%s<span>tsesp<small>ESP32 üzerinde tailnet düğümü</small></span></h1>"
         "</div>"
         "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
@@ -707,14 +725,11 @@ static esp_err_t get_status(httpd_req_t *req) {
     }
 
     o += snprintf(page + o, cap - o,
-        "<div class=tabs>"
-        "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
-        "<input type=radio name=tab id=t3><input type=radio name=tab id=t4>"
-        "<input type=radio name=tab id=t5>"
         "<div class=tabbar>"
         "<label for=t1>Genel</label><label for=t2>Ağ</label>"
         "<label for=t3>Cihazlar</label><label for=t4>Sistem</label>"
         "<label for=t5>Ayarlar</label></div>"
+        "</div>"
         "<div class=panels>");
 
     /* ---- Genel ---- */
@@ -946,7 +961,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     // Refreshes the panels only. The tab radios live outside them, so the
     // section you are looking at stays put.
     o += snprintf(page + o, cap - o,
-        "</div></div></div>"
+        "</div></div>"
         "<script>"
         // The refresh replaces the panels wholesale, which would throw away a
         // chosen file or a running upload. OB parks it from the moment a file
