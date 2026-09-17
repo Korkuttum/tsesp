@@ -138,14 +138,14 @@ static const char CSS[] =
     "h1{display:flex;align-items:center;font-size:19px;margin:0;letter-spacing:-.2px}"
     "h1 small{display:block;font-size:12px;color:var(--dim);font-weight:400;letter-spacing:0}"
     ".gear{color:var(--dim);text-decoration:none;font-size:20px;padding:7px 10px;"
-    "border:1px solid var(--line);border-radius:9px;background:var(--card)}"
+    "border:1px solid var(--line);border-radius:6px;background:var(--card)}"
     /* the headline strip */
-    ".hero{background:var(--card);border:1px solid var(--line);border-radius:14px;"
+    ".hero{background:var(--card);border:1px solid var(--line);border-radius:8px;"
     "padding:16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
     ".dot{width:11px;height:11px;border-radius:50%;flex:0 0 11px}"
-    ".dot.ok{background:var(--green);box-shadow:0 0 0 4px rgba(34,197,94,.16)}"
-    ".dot.warn{background:var(--amber);box-shadow:0 0 0 4px rgba(245,158,11,.16)}"
-    ".dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(239,68,68,.16)}"
+    ".dot.ok{background:var(--green)}"
+    ".dot.warn{background:var(--amber)}"
+    ".dot.bad{background:var(--red)}"
     ".dot.none{background:var(--sigoff)}"
     ".hero .st{font-weight:600}"
     ".hero .addr{margin-left:auto;font-family:ui-monospace,Menlo,monospace;"
@@ -153,8 +153,8 @@ static const char CSS[] =
     /* tabs, done with radios so switching needs no script */
     ".tabs input{position:absolute;opacity:0;pointer-events:none}"
     ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
-    "border-radius:11px;padding:4px;margin-bottom:14px;overflow-x:auto}"
-    ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:8px;"
+    "border-radius:8px;padding:4px;margin-bottom:14px;overflow-x:auto}"
+    ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:6px;"
     "font-size:14px;color:var(--dim);white-space:nowrap;cursor:pointer}"
     ".panel{display:none}"
     "#t1:checked~.tabbar label[for=t1],#t2:checked~.tabbar label[for=t2],"
@@ -163,20 +163,34 @@ static const char CSS[] =
     "#t1:checked~.panels .p1,#t2:checked~.panels .p2,"
     "#t3:checked~.panels .p3,#t4:checked~.panels .p4,"
     "#t5:checked~.panels .p5{display:block}"
-    /* cards */
-    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
-    "@media(min-width:620px){.grid{grid-template-columns:1fr 1fr 1fr}}"
-    ".cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}"
-    ".cell .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}"
-    ".cell .v{font-size:17px;margin-top:4px;font-variant-numeric:tabular-nums;"
-    "font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
+    /* stat rows - a bordered table, label left and value right, one line each,
+       the way a router's status page reads rather than a grid of app tiles. */
+    ".grid{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}"
+    ".cell{display:flex;align-items:center;justify-content:space-between;gap:14px;"
+    "min-width:0;padding:10px 14px;border-bottom:1px solid var(--line)}"
+    ".cell:last-child{border-bottom:0}"
+    ".cell .k{flex:0 0 auto;color:var(--dim);font-size:13px}"
+    ".cell .v{flex:1 1 auto;min-width:0;text-align:right;font-size:14px;"
+    "font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;"
+    "overflow-wrap:anywhere}"
     ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;white-space:nowrap}"
-    ".cell .v.row{display:flex;align-items:center;gap:6px}"
+    ".cell .v.row{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
-       value anyway. */
-    ".cell .v.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-    ".cell.wide{grid-column:1/-1}"
+       value anyway. min-width:0 is what actually does that: without it a
+       flex child never gives up its content width, so one long address with
+       nowhere to wrap pushes the row - and the whole page - sideways, which
+       is the horizontal scroll this used to have. */
+    ".cell .v.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}"
+    /* the one cell that holds a list instead of a single value */
+    ".cell.list{display:block}"
+    ".cell.list .k{display:block;margin-bottom:6px}"
+    ".cell.list .v{display:block;text-align:left}"
+    ".dev{display:flex;justify-content:space-between;gap:10px;padding:4px 0;"
+    "border-top:1px solid var(--line);font-size:13px}"
+    ".dev:first-child{border-top:0}"
+    ".dev b{font-weight:500;font-family:ui-monospace,Menlo,monospace}"
+    ".dev span{color:var(--dim);font-family:ui-monospace,Menlo,monospace}"
     ".cp{flex:0 0 auto;background:none;border:0;color:var(--dim);cursor:pointer;"
     "padding:3px;width:auto;margin:0;border-radius:6px;display:inline-flex;"
     "align-items:center}"
@@ -202,27 +216,29 @@ static const char CSS[] =
     ".sig b:nth-child(5){height:18px}"
     ".sig b.on{background:var(--green)}.sig.w b.on{background:var(--amber)}"
     ".sig.b b.on{background:var(--red)}"
-    /* peers */
-    ".peer{display:flex;align-items:center;gap:11px;background:var(--card);"
-    "border:1px solid var(--line);border-radius:11px;padding:11px 13px;margin-bottom:7px}"
+    /* peers - one bordered list, a row each, not a stack of separate cards */
+    ".plist{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}"
+    ".peer{display:flex;align-items:center;gap:11px;padding:11px 14px;"
+    "border-bottom:1px solid var(--line)}"
+    ".peer:last-child{border-bottom:0}"
     ".peer .nm{flex:1;min-width:0}"
     ".peer .nm b{display:flex;align-items:center;font-weight:500;font-size:14px}"
     ".peer .nm b>button{flex:0 0 auto}"
     ".peer .nm span{display:flex;align-items:center;color:var(--dim);font-size:12px;"
     "font-family:ui-monospace,Menlo,monospace}"
-    ".tag{font-size:11px;padding:4px 9px;border-radius:20px;white-space:nowrap}"
+    ".tag{font-size:11px;padding:4px 9px;border-radius:4px;white-space:nowrap}"
     ".tag.direct{background:rgba(34,197,94,.16);color:var(--green)}"
     ".tag.relay{background:rgba(59,130,246,.16);color:var(--blue)}"
     ".tag.probing{background:rgba(245,158,11,.18);color:var(--amber)}"
     ".tag.none{background:rgba(125,139,153,.12);color:var(--dim)}"
     ".banner{background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.4);"
-    "border-radius:12px;padding:14px 16px;margin-bottom:14px}"
+    "border-radius:8px;padding:14px 16px;margin-bottom:14px}"
     ".banner a{color:var(--blue);font-weight:500}"
     "label.f{display:block;margin:14px 0 5px;color:var(--dim);font-size:13px}"
     "input,select{width:100%;padding:12px;font-size:16px;border:1px solid var(--line);"
-    "border-radius:10px;background:var(--card);color:var(--fg)}"
+    "border-radius:6px;background:var(--card);color:var(--fg)}"
     "button{width:100%;margin-top:20px;padding:13px;font-size:15px;font-weight:500;"
-    "border:0;border-radius:10px;background:var(--blue);color:#fff}"
+    "border:0;border-radius:6px;background:var(--blue);color:#fff}"
     "button.danger{background:transparent;border:1px solid var(--line);color:var(--red);"
     "font-size:13px;padding:10px}"
     "button:disabled{opacity:.5}"
@@ -233,7 +249,7 @@ static const char CSS[] =
        one that can show which file was chosen, which the real picker does not
        do once the page repaints. */
     ".fpick{display:block;margin-top:16px;padding:13px;border:1px dashed "
-    "var(--line);border-radius:10px;background:var(--card);color:var(--dim);"
+    "var(--line);border-radius:6px;background:var(--card);color:var(--dim);"
     "font-size:14px;text-align:center;cursor:pointer}"
     ".fpick.has{color:var(--fg);border-style:solid}"
     "code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:var(--fg)}"
@@ -573,6 +589,12 @@ static const char *bare_addr(const char *addr, char *buf, size_t cap) {
     return buf;
 }
 
+static const char *mac_str(const uint8_t *addr, char *buf, size_t cap) {
+    snprintf(buf, cap, "%02x:%02x:%02x:%02x:%02x:%02x",
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return buf;
+}
+
 static esp_err_t get_status(httpd_req_t *req) {
     // The panels are rendered in order and the settings one is last, so when
     // this runs out it is the update form that disappears - the one control
@@ -586,7 +608,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     // request at a time, so sharing them is safe.
     static char c1[COPY_CELL_MAX], c2[COPY_CELL_MAX], c3[COPY_CELL_MAX];
     static char c4[COPY_CELL_MAX], c5[COPY_CELL_MAX];
-    char bare[48];
+    char bare[48], mac[18];
     const char *dot = "warn";
     int rssi = 0, channel = 0, bars, core0 = -1, core1 = -1;
     uint32_t link_reconnects = 0;
@@ -598,7 +620,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     bool tr_hooked = false;
     uint32_t wo_total = 0, wo_lan = 0, fwd_wifi = 0, fwd_ans = 0;
     uint32_t nat_o = 0, nat_i = 0, nat_miss = 0, cb_in = 0, cb_out = 0, in_calls = 0; int nat_n = 0;
-    char arp[240];
+    char arp[900];
     esp_chip_info_t chip;
     uint32_t flash = 0;
     const esp_partition_t *app = esp_ota_get_running_partition();
@@ -632,17 +654,17 @@ static esp_err_t get_status(httpd_req_t *req) {
     {
         size_t i;
         int n = 0;
-        arp[0] = '\0';
         for (i = 0; i < ARP_TABLE_SIZE; i++) {
             ip4_addr_t *ipa = NULL;
             struct netif *nif = NULL;
             struct eth_addr *eth = NULL;
             if (!etharp_get_entry(i, &ipa, &nif, &eth) || !ipa) continue;
-            n += snprintf(arp + n, sizeof(arp) - n, "%s%s", n ? ", " : "",
-                          ip4addr_ntoa(ipa));
-            if ((size_t)n >= sizeof(arp) - 20) break;
+            n += snprintf(arp + n, sizeof(arp) - n,
+                          "<div class=dev><b>%s</b><span>%s</span></div>",
+                          ip4addr_ntoa(ipa), mac_str(eth->addr, mac, sizeof(mac)));
+            if ((size_t)n >= sizeof(arp) - 100) break;
         }
-        if (!arp[0]) snprintf(arp, sizeof(arp), "hicbiri");
+        if (!n) snprintf(arp, sizeof(arp), "hiçbiri");
     }
     derp_task_stats(&derp_tx, &derp_rx);
     cpu_load(&core0, &core1);
@@ -724,7 +746,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Ağa çıkarılan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Rotası yok</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Yığında düşen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell wide><div class=k>Ev ağında görülen cihazlar</div><div class=v>%s</div></div>"
+        "<div class='cell list'><div class=k>Ev ağında görülen cihazlar</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Wi-Fi izleyici</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Çevrilmemiş çıkan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>LAN'dan dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
@@ -768,7 +790,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)derp_tx, (unsigned)derp_rx);
 
     /* ---- Peer'lar ---- */
-    o += snprintf(page + o, cap - o, "<div class='panel p3'>");
+    o += snprintf(page + o, cap - o, "<div class='panel p3'><div class=plist>");
     if (n == 0)
         o += snprintf(page + o, cap - o,
             "<div class=peer><div class=nm><b>Henüz yok</b>"
@@ -805,7 +827,7 @@ static esp_err_t get_status(httpd_req_t *req) {
             e->addr[0] ? bare : "-", e->addr[0] ? bare : "-",
             tag);
     }
-    o += snprintf(page + o, cap - o, "</div>");
+    o += snprintf(page + o, cap - o, "</div></div>");
 
     /* ---- Sistem ---- */
     meter(m1, sizeof(m1), core0);
