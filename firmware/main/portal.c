@@ -239,19 +239,28 @@ static const char CSS[] =
     "border-radius:6px;background:var(--card);color:var(--fg)}"
     "button{width:100%;margin-top:20px;padding:13px;font-size:15px;font-weight:500;"
     "border:0;border-radius:6px;background:var(--blue);color:#fff}"
-    "button.danger{background:transparent;border:1px solid var(--line);color:var(--red);"
-    "font-size:13px;padding:10px}"
     "button:disabled{opacity:.5}"
+    /* A settings action lives in its row, next to the sentence explaining it -
+       not as one more full-width button in a stack of look-alike buttons. */
+    "button.mini{width:auto;flex:0 0 auto;margin:0;padding:9px 16px;font-size:13px}"
+    "button.mini.danger{background:rgba(239,68,68,.12);color:var(--red);"
+    "border:1px solid rgba(239,68,68,.35)}"
+    ".cell.act{align-items:flex-start;padding:14px}"
+    ".cell.act .k{flex:1 1 auto;font-size:14px;color:var(--fg)}"
+    ".cell .sub{color:var(--dim);font-size:12.5px;font-weight:400;"
+    "margin-top:3px;line-height:1.4}"
     /* The browser draws a file input itself, and the generic input rule above
        gives it a padded, bordered box that iOS Safari then renders the picker
        inside - clipped, and on a phone effectively invisible. So the input is
        hidden and this label stands in for it: a control we draw entirely, and
        one that can show which file was chosen, which the real picker does not
        do once the page repaints. */
-    ".fpick{display:block;margin-top:16px;padding:13px;border:1px dashed "
+    ".fpick{display:block;padding:13px;border:1px dashed "
     "var(--line);border-radius:6px;background:var(--card);color:var(--dim);"
     "font-size:14px;text-align:center;cursor:pointer}"
     ".fpick.has{color:var(--fg);border-style:solid}"
+    ".upload{display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap}"
+    ".upload .fpick{flex:1 1 200px}"
     "code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:var(--fg)}"
     "a{color:var(--blue);word-break:break-all}"
     "</style>";
@@ -904,9 +913,11 @@ static esp_err_t get_status(httpd_req_t *req) {
             "<div class=cell><div class=k>Sürüm</div><div class=v>%s</div></div>"
             "</div>"
             "%s"
-            "<label class=fpick for=fw id=fwl>.bin dosyasi sec</label>"
+            "<div class=upload>"
+            "<label class=fpick for=fw id=fwl>.bin dosyası seç</label>"
             "<input type=file id=fw accept='.bin' hidden>"
-            "<button id=fwb onclick='up()'>Yükle ve yeniden başlat</button>"
+            "<button id=fwb class=mini onclick='up()'>Yükle</button>"
+            "</div>"
             "<p class=hint id=fws></p>",
             ota_running_slot(),
             ost == OTA_IMG_TRIAL ? "deneme sürümü" :
@@ -919,17 +930,18 @@ static esp_err_t get_status(httpd_req_t *req) {
                 "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>" : "");
     }
     o += snprintf(page + o, cap - o,
-        "<h2>Tailscale</h2>"
-        "<p class=hint>Cihazın tailnet kimliğini siler ve yeni bir giriş bağlantısı "
-        "üretir. Wi-Fi ayarları korunur.</p>"
-        "<form method=POST action=/rejoin>"
-        "<button type=submit>Tailscale'e yeniden kaydol</button></form>"
-        "<h2>Wi-Fi ve kimlik</h2>"
-        "<p class=hint>Her şeyi siler. Cihaz kurulum moduna döner ve kendi Wi-Fi "
-        "ağını açar; baştan kurman gerekir.</p>"
-        "<form method=POST action=/forget onsubmit=\"return confirm('Tüm ayarlar silinecek. Emin misin?')\">"
-        "<button class=danger type=submit>Her şeyi sil ve baştan kur</button></form>"
-        "</div>");
+        "<h2>İşlemler</h2>"
+        "<div class=grid>"
+        "<form class='cell act' method=POST action=/rejoin>"
+        "<div class=k>Tailscale'e yeniden kaydol<div class=sub>Kimliği siler ve yeni "
+        "bir giriş bağlantısı üretir. Wi-Fi ayarları korunur.</div></div>"
+        "<button class=mini type=submit>Kaydol</button></form>"
+        "<form class='cell act' method=POST action=/forget "
+        "onsubmit=\"return confirm('Tüm ayarlar silinecek. Emin misin?')\">"
+        "<div class=k>Her şeyi sil ve baştan kur<div class=sub>Wi-Fi ve tailnet "
+        "kimliğini siler. Cihaz kurulum moduna döner.</div></div>"
+        "<button class='mini danger' type=submit>Sil</button></form>"
+        "</div></div>");
 
     // Refreshes the panels only. The tab radios live outside them, so the
     // section you are looking at stays put.
