@@ -234,9 +234,10 @@ static const char CSS[] =
     ".card h2{margin:0 0 12px;font-size:16px;font-weight:700;text-align:center;"
     "text-transform:none;letter-spacing:-.2px;color:var(--fg)}"
     ".card hr{border:0;border-top:1px solid var(--line);margin:0}"
-    ".rowline{display:flex;align-items:baseline;gap:8px;padding:8px 0;font-size:14px;"
-    "border-bottom:1px solid var(--line)}"
+    ".rowline{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:8px 0;"
+    "font-size:14px;border-bottom:1px solid var(--line)}"
     ".rowline:last-child{border-bottom:0}"
+    ".rowline .bar{flex:0 0 100%}"
     ".rowline .k{color:var(--dim)}"
     ".rowline .v{margin-left:auto;text-align:right;font-weight:600;"
     "font-family:ui-monospace,Menlo,monospace;font-size:14px}"
@@ -871,6 +872,12 @@ static esp_err_t get_status(httpd_req_t *req) {
             shown++;
         }
     }
+    // Computed again down in the Sistem tab, from the same core0/core1/heap
+    // numbers - cheap, and it means this preview never drifts from the detail
+    // tab it is a preview of.
+    meter(m1, sizeof(m1), core0);
+    meter(m2, sizeof(m2), core1);
+    meter(m3, sizeof(m3), heap_total ? (int)(100 - heap_free * 100 / heap_total) : 0);
     o += snprintf(page + o, room(cap, o),
         "<div class='panel p1'><div class=cardgrid>"
         "<div class=card>" ICON_GLOBE "<h2>Tailnet</h2><hr>"
@@ -891,9 +898,9 @@ static esp_err_t get_status(httpd_req_t *req) {
         "</div>"
         "<div class=card>" ICON_SYS "<h2>Sistem</h2><hr>"
         "<div class=rowline><span class=k>Yazılım sürümü</span><span class=v>%s</span></div>"
-        "<div class=rowline><span class=k>Çekirdek 1</span><span class=v>%d<small> %%</small></span></div>"
-        "<div class=rowline><span class=k>Çekirdek 2</span><span class=v>%d<small> %%</small></span></div>"
-        "<div class=rowline><span class=k>Bellek</span><span class=v>%u/%u<small> KB</small></span></div>"
+        "<div class=rowline><span class=k>Çekirdek 1</span><span class=v>%d<small> %%</small></span>%s</div>"
+        "<div class=rowline><span class=k>Çekirdek 2</span><span class=v>%d<small> %%</small></span>%s</div>"
+        "<div class=rowline><span class=k>Bellek</span><span class=v>%u/%u<small> KB</small></span>%s</div>"
         "</div>"
         "<div class=card>" ICON_DEVS "<h2>Bağlı Cihazlar</h2><hr>%s</div>"
         "</div></div>",
@@ -906,8 +913,8 @@ static esp_err_t get_status(httpd_req_t *req) {
              s_status.route_approved == 0 ? "<span class='pill warn'>onay bekliyor</span>" :
              "<span class='pill warn'>bilinmiyor</span>")
             : "-",
-        desc ? desc->version : "?", core0 < 0 ? 0 : core0, core1 < 0 ? 0 : core1,
-        (unsigned)((heap_total - heap_free) / 1024), (unsigned)(heap_total / 1024),
+        desc ? desc->version : "?", core0 < 0 ? 0 : core0, m1, core1 < 0 ? 0 : core1, m2,
+        (unsigned)((heap_total - heap_free) / 1024), (unsigned)(heap_total / 1024), m3,
         devrows);
 
     /* ---- Ag ---- */
