@@ -60,6 +60,14 @@ static int hexval(char c) {
     return -1;
 }
 
+// snprintf returns how much it WOULD have written, not how much fit - so once
+// a page's running offset passes its buffer's size, a plain "cap - o" wraps
+// past zero (both are size_t) into a huge count, and every call after that
+// believes it has nearly unlimited room and writes straight past the
+// allocation. A page that outgrows its buffer is expected to just lose its
+// last tab, not corrupt the heap; this is what keeps that true.
+static inline size_t room(size_t cap, size_t o) { return o < cap ? cap - o : 0; }
+
 // Pulls one field out of an application/x-www-form-urlencoded body.
 static bool form_field(const char *body, const char *name, char *out, size_t cap) {
     size_t nlen = strlen(name);
@@ -155,7 +163,7 @@ static const char CSS[] =
     "padding:0 14px;flex-wrap:wrap}"
     ".brand{color:#fff;font-size:17px;font-weight:600;padding:11px 14px 11px 0;"
     "letter-spacing:-.2px;display:flex;align-items:center;gap:8px}"
-    ".brand svg{width:22px;height:22px;margin:0}"
+    ".brand svg{width:34px;height:34px;margin:0}"
     ".luciheader nav{display:flex;align-self:stretch;flex:1}"
     ".tabs input{position:absolute;opacity:0;pointer-events:none}"
     ".luciheader nav label{color:#bfbfbf;padding:0 14px;font-size:13.5px;cursor:pointer;"
@@ -235,16 +243,21 @@ static const char CSS[] =
        this is a pure reskin with no change to how a panel is built. */
     ".grid{background:var(--card);border:1px solid var(--line);border-radius:14px;"
     "padding:2px 14px;margin-bottom:4px}"
-    ".cell{display:flex;align-items:baseline;gap:10px;padding:10px 0;"
+    ".cell{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;padding:10px 0;"
     "border-bottom:1px solid var(--line)}"
     ".cell:last-child{border-bottom:0}"
-    ".cell.wide{flex-wrap:wrap}"
+    /* A cell with a meter bar has a third child after .k/.v - force it onto
+       its own full-width line instead of squeezing into the label/value row. */
+    ".cell .bar{flex:0 0 100%}"
     ".cell .k{color:var(--dim);font-size:13.5px}"
     ".cell .v{margin-left:auto;text-align:right;font-size:14px;"
     "font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;"
     "word-break:break-all;font-weight:600}"
     ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;"
     "font-weight:400;white-space:nowrap}"
+    /* A wide cell's value is a long comma-separated list, not a short number -
+       give it its own full-width, left-aligned line under the label. */
+    ".cell.wide .v{flex:0 0 100%;margin-left:0;text-align:left}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
@@ -373,7 +386,7 @@ static esp_err_t get_setup(httpd_req_t *req) {
         else n = 0;
     }
 
-    o += snprintf(page + o, 16384 - o,
+    o += snprintf(page + o, room(16384, o),
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp kurulum</title>%s"
         "<div class=wrap><h1>%s tsesp</h1>"
         "<p class=sub>Cihazi ev agina bagla</p>"
@@ -385,12 +398,12 @@ static esp_err_t get_setup(httpd_req_t *req) {
         char esc[80];
         html_escape(esc, sizeof(esc), (const char *)aps[i].ssid);
         if (esc[0])
-            o += snprintf(page + o, 16384 - o, "<option value=\"%s\">%s (%d dBm)</option>",
+            o += snprintf(page + o, room(16384, o), "<option value=\"%s\">%s (%d dBm)</option>",
                           esc, esc, aps[i].rssi);
     }
     free(aps);
 
-    o += snprintf(page + o, 16384 - o,
+    o += snprintf(page + o, room(16384, o),
         "</select>"
         // A scan can come back empty, and hidden networks never show up at
         // all, so typing the name has to stay possible.
@@ -665,8 +678,8 @@ static void sig_html(char *out, size_t cap, int bars) {
     int i;
     size_t o = (size_t)snprintf(out, cap, "<span class='sig %s'>", cls);
     for (i = 1; i <= 5; i++)
-        o += (size_t)snprintf(out + o, cap - o, "<b class='%s'></b>", i <= bars ? "on" : "");
-    snprintf(out + o, cap - o, "</span>");
+        o += (size_t)snprintf(out + o, room(cap, o), "<b class='%s'></b>", i <= bars ? "on" : "");
+    snprintf(out + o, room(cap, o), "</span>");
 }
 
 // "100.115.225.84/32" is how the netmap states it; nobody wants to copy the
@@ -698,9 +711,12 @@ static void peer_tag(char *tag, size_t cap, peer_entry *e) {
 static esp_err_t get_status(httpd_req_t *req) {
     // The panels are rendered in order and the settings one is last, so when
     // this runs out it is the update form that disappears - the one control
-    // somebody may be reaching for from a long way away. Hence the headroom.
-    char *page = malloc(28672);
-    size_t cap = 28672, o = 0;
+    // somebody may be reaching for from a long way away. Hence the headroom -
+    // bumped once already, when a heavier CSS and a real device's own field
+    // lengths (a long SSID, an internet address with a port) pushed a live
+    // page past the old 28672 and past room()'s safe-truncation floor too.
+    char *page = malloc(32768);
+    size_t cap = 32768, o = 0;
     char ip[16], up[24], esc[520], pub[64], wifi_ssid[36];
     char sig[240], m1[96], m2[96], m3[96];
     // Static, not on the stack: three of these plus the device row list is
@@ -780,7 +796,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     if (s_status.tailnet_addr && s_status.tailnet_addr[0]) dot = "ok";
     if (!net_is_connected()) dot = "bad";
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp</title>%s"
         "<div class=tabs>"
         "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
@@ -796,6 +812,11 @@ static esp_err_t get_status(httpd_req_t *req) {
         ".setAttribute('data-theme',this.checked?'dark':'light')\">"
         "<span class=ts-track><span class=ts-knob>" ICON_SUN ICON_MOON "</span></span>"
         "</label></div>"
+        // The switch itself has no opinion until touched - it should still
+        // show the theme the page actually opened in, which is dark unless
+        // the browser asked for light (the same rule the CSS above follows).
+        "<script>document.getElementById('theme-toggle').checked="
+        "!matchMedia('(prefers-color-scheme:light)').matches</script>"
         "</div></div>"
         "<div class=wrap>"
         "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
@@ -805,12 +826,12 @@ static esp_err_t get_status(httpd_req_t *req) {
 
     if (s_status.login_url && s_status.login_url[0]) {
         html_escape(esc, sizeof(esc), s_status.login_url);
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class=banner>Bu cihazi tailnet'ine katmak icin onayla:<br>"
             "<a href=\"%s\" target=_blank rel=noopener>%s</a></div>", esc, esc);
     }
 
-    o += snprintf(page + o, cap - o, "<div class=panels>");
+    o += snprintf(page + o, room(cap, o), "<div class=panels>");
 
     /* ---- Genel: kart kart özet ---- */
     n = peers_count();
@@ -837,7 +858,7 @@ static esp_err_t get_status(httpd_req_t *req) {
             shown++;
         }
     }
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<div class='panel p1'><div class=cardgrid>"
         "<div class=card>" ICON_GLOBE "<h2>Tailnet</h2><hr>"
         "<div class=rowline><span class=k>Cihaz adı</span><span class=v>%s</span></div>"
@@ -877,7 +898,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         devrows);
 
     /* ---- Ag ---- */
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<div class='panel p2'><h2>Wi-Fi</h2><p class=hint>Cihazın bağlandığı ev ağı. Sinyal zayıfsa bağlantı kopmasa da yavaşlar.</p><div class=grid>"
         "<div class=cell><div class=k>Bağlı olduğu ağ</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Sinyal</div><div class=v>%s%d<small> dBm, %s</small></div></div>"
@@ -939,12 +960,12 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)derp_tx, (unsigned)derp_rx);
 
     /* ---- Peer'lar ---- */
-    o += snprintf(page + o, cap - o, "<div class='panel p3'>");
+    o += snprintf(page + o, room(cap, o), "<div class='panel p3'>");
     if (n == 0)
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class=peer><div class=nm><b>Henüz yok</b>"
             "<span>ağ haritası bekleniyor</span></div></div>");
-    for (i = 0; i < n && cap - o > 700; i++) {
+    for (i = 0; i < n && room(cap, o) > 700; i++) {
         peer_entry *e = peers_at(i);
         char nm[TS_NAME_STR * 2], tag[80];
         if (!e) continue;
@@ -953,7 +974,7 @@ static esp_err_t get_status(httpd_req_t *req) {
 
         html_escape(nm, sizeof(nm), e->name[0] ? e->name : "(isimsiz)");
         bare_addr(e->addr, bare, sizeof(bare));
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class=peer><span class='dot %s'></span>"
             "<div class=nm>"
             "<b>%s<button class='cp sm' onclick=\"cp(this,'%s')\" "
@@ -966,14 +987,14 @@ static esp_err_t get_status(httpd_req_t *req) {
             e->addr[0] ? bare : "-", e->addr[0] ? bare : "-",
             tag);
     }
-    o += snprintf(page + o, cap - o, "</div>");
+    o += snprintf(page + o, room(cap, o), "</div>");
 
     /* ---- Sistem ---- */
     meter(m1, sizeof(m1), core0);
     meter(m2, sizeof(m2), core1);
     meter(m3, sizeof(m3), heap_total ? (int)(100 - heap_free * 100 / heap_total) : 0);
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<div class='panel p4'>"
         "<h2>İşlemci</h2><p class=hint>Son birkaç saniyedeki ortalama yük.</p>"
         "<div class=grid>"
@@ -984,7 +1005,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         core0 < 0 ? 0 : core0, m1, core1 < 0 ? 0 : core1, m2,
         CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<h2>Bellek</h2>"
         "<p class=hint>Toplam %u KB. Boş bellek tükenirse cihaz yeniden başlar.</p>"
         "<div class=grid>"
@@ -997,7 +1018,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)((heap_total - heap_free) / 1024), m3,
         (unsigned)(heap_free / 1024), (unsigned)(heap_min / 1024));
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<h2>Donanım</h2><div class=grid>"
         "<div class=cell><div class=k>Kart</div><div class=v>%s<small> v%d.%d</small></div></div>"
         "<div class=cell><div class=k>Depolama</div><div class=v>%u<small> MB</small></div></div>"
@@ -1010,7 +1031,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)(app ? app->size / 1024 : 0),
         desc ? desc->version : "?", reset_reason_name());
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<h2>Ayrıntı (teknik)</h2>"
         "<p class=hint>Her görevin yığınında kalan boş yer, ve belleğin en büyük "
         "tek parçası. Sıfıra yaklaşan bir değer yeniden başlamaya yol açar.</p>"
@@ -1028,7 +1049,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     /* ---- Ayarlar ---- */
     {
         ota_state ost = ota_running_state();
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class='panel p5'>"
             "<h2>Yazılım güncelleme</h2>"
             "<p class=hint>Bilgisayarda derlenen <code>.bin</code> dosyasını yükle; "
@@ -1057,7 +1078,7 @@ static esp_err_t get_status(httpd_req_t *req) {
                 "<p class=hint><b>Not:</b> en son yüklenen yazılım kendini "
                 "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>" : "");
     }
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<h2>Tailscale</h2>"
         "<p class=hint>Cihazın tailnet kimliğini siler ve yeni bir giriş bağlantısı "
         "üretir. Wi-Fi ayarları korunur.</p>"
@@ -1072,7 +1093,7 @@ static esp_err_t get_status(httpd_req_t *req) {
 
     // Refreshes the panels only. The tab radios live outside them, so the
     // section you are looking at stays put.
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "</div></div></div>"
         "<script>"
         // The refresh replaces the panels wholesale, which would throw away a
@@ -1136,7 +1157,7 @@ static esp_err_t get_settings(httpd_req_t *req) {
     net_get_ip(ip, sizeof(ip));
     if (!magic_get_public(pub, sizeof(pub))) snprintf(pub, sizeof(pub), "öğrenilemedi");
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp ayarlar</title>%s"
         "<div class=wrap><div class=top><div><h1>%s Ayarlar</h1>"
         "<p class=sub>Cihaz bilgileri ve sifirlama</p></div>"
