@@ -119,43 +119,43 @@ static const char LOGO[] =
 static const char CSS[] =
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<style>"
-    /* LuCI-style dashboard palette: light by default (matches the reference
-       dashboard we designed against), dark for whoever's system prefers it.
-       No script needed either way - same trick the tabs below use. */
+    /* Follows whatever the phone or laptop is set to. The dark values stay
+       the default, so a browser that ignores the query still gets a readable
+       page rather than black text on a black ground. */
     ":root{color-scheme:light dark;"
-    "--bg:#ffffff;--card:#e8e8e9;--line:#d3d3d4;--dim:#6b6b6d;--fg:#1c1c1e;"
-    "--track:#d3d3d4;--sigoff:#d3d9df;--hover:#dcdcdd;"
-    "--blue:#2a8fd8;--green:#2f9e52;--amber:#c9821f;--red:#d23c30}"
-    "@media(prefers-color-scheme:dark){:root{"
-    "--bg:#17181b;--card:#222327;--line:#34353a;--dim:#97979b;--fg:#f0f0f0;"
-    "--track:#34353a;--sigoff:#3a3b40;--hover:#2c2d31;"
-    "--blue:#5aa9e6;--green:#4ade80;--amber:#f0ad4e;--red:#ff6b5b}}"
+    "--bg:#0b0f14;--card:#141a21;--line:#1f2831;--dim:#7d8b99;--fg:#e6edf3;"
+    "--track:#222c36;--sigoff:#2b3640;--hover:#1d252e;"
+    "--blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444}"
+    "@media(prefers-color-scheme:light){:root{"
+    "--bg:#f4f6f8;--card:#ffffff;--line:#e2e6ea;--dim:#68727d;--fg:#111820;"
+    "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
+    "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}}"
     "*{box-sizing:border-box}"
     "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:18px 14px 40px;"
     "background:var(--bg);color:var(--fg)}"
     ".wrap{max-width:860px;margin:0 auto}"
     ".top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}"
-    "h1{display:flex;align-items:center;font-size:20px;font-weight:700;margin:0;letter-spacing:-.3px}"
+    "h1{display:flex;align-items:center;font-size:19px;margin:0;letter-spacing:-.2px}"
     "h1 small{display:block;font-size:12px;color:var(--dim);font-weight:400;letter-spacing:0}"
     ".gear{color:var(--dim);text-decoration:none;font-size:20px;padding:7px 10px;"
-    "border-radius:9px;background:var(--card)}"
+    "border:1px solid var(--line);border-radius:9px;background:var(--card)}"
     /* the headline strip */
-    ".hero{background:var(--card);border-radius:16px;"
-    "padding:16px 18px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
-    ".dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px}"
-    ".dot.ok{background:var(--green);box-shadow:0 0 0 4px rgba(47,158,82,.16)}"
-    ".dot.warn{background:var(--amber);box-shadow:0 0 0 4px rgba(201,130,31,.16)}"
-    ".dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(210,60,48,.16)}"
+    ".hero{background:var(--card);border:1px solid var(--line);border-radius:14px;"
+    "padding:16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
+    ".dot{width:11px;height:11px;border-radius:50%;flex:0 0 11px}"
+    ".dot.ok{background:var(--green);box-shadow:0 0 0 4px rgba(34,197,94,.16)}"
+    ".dot.warn{background:var(--amber);box-shadow:0 0 0 4px rgba(245,158,11,.16)}"
+    ".dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(239,68,68,.16)}"
     ".dot.none{background:var(--sigoff)}"
     ".hero .st{font-weight:600}"
     ".hero .addr{margin-left:auto;font-family:ui-monospace,Menlo,monospace;"
     "font-size:14px;color:var(--dim)}"
     /* tabs, done with radios so switching needs no script */
     ".tabs input{position:absolute;opacity:0;pointer-events:none}"
-    ".tabbar{display:flex;gap:4px;background:var(--card);"
-    "border-radius:13px;padding:4px;margin-bottom:14px;overflow-x:auto}"
-    ".tabbar label{flex:1;text-align:center;padding:9px 12px;border-radius:9px;"
-    "font-size:13.5px;font-weight:500;color:var(--dim);white-space:nowrap;cursor:pointer}"
+    ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
+    "border-radius:11px;padding:4px;margin-bottom:14px;overflow-x:auto}"
+    ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:8px;"
+    "font-size:14px;color:var(--dim);white-space:nowrap;cursor:pointer}"
     ".panel{display:none}"
     "#t1:checked~.tabbar label[for=t1],#t2:checked~.tabbar label[for=t2],"
     "#t3:checked~.tabbar label[for=t3],#t4:checked~.tabbar label[for=t4],"
@@ -166,20 +166,17 @@ static const char CSS[] =
     /* cards */
     ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
     "@media(min-width:620px){.grid{grid-template-columns:1fr 1fr 1fr}}"
-    ".cell{background:var(--card);border-radius:14px;padding:12px 14px}"
+    ".cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}"
     ".cell .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}"
     ".cell .v{font-size:17px;margin-top:4px;font-variant-numeric:tabular-nums;"
-    "font-weight:600;font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
-    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;font-weight:400;white-space:nowrap}"
+    "font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
+    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;white-space:nowrap}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
        value anyway. */
     ".cell .v.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
     ".cell.wide{grid-column:1/-1}"
-    ".cell.kpi{text-align:center}"
-    ".cell.kpi .ic{margin:0 auto 8px;display:block}"
-    ".cell.kpi .k{margin-top:2px}"
     ".cp{flex:0 0 auto;background:none;border:0;color:var(--dim);cursor:pointer;"
     "padding:3px;width:auto;margin:0;border-radius:6px;display:inline-flex;"
     "align-items:center}"
@@ -189,7 +186,7 @@ static const char CSS[] =
     ".cp.sm:hover{opacity:1;background:none}"
     ".cp.sm svg{width:13px;height:13px}"
     "h2{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;"
-    "font-weight:700;margin:18px 0 8px}"
+    "margin:18px 0 8px}"
     "h2:first-child{margin-top:0}"
     ".hint{color:var(--dim);font-size:12.5px;margin:-4px 0 10px;line-height:1.45}"
     /* meters */
@@ -207,27 +204,25 @@ static const char CSS[] =
     ".sig.b b.on{background:var(--red)}"
     /* peers */
     ".peer{display:flex;align-items:center;gap:11px;background:var(--card);"
-    "border-radius:13px;padding:11px 13px;margin-bottom:7px}"
+    "border:1px solid var(--line);border-radius:11px;padding:11px 13px;margin-bottom:7px}"
     ".peer .nm{flex:1;min-width:0}"
     ".peer .nm b{display:flex;align-items:center;font-weight:500;font-size:14px}"
     ".peer .nm b>button{flex:0 0 auto}"
     ".peer .nm span{display:flex;align-items:center;color:var(--dim);font-size:12px;"
     "font-family:ui-monospace,Menlo,monospace}"
-    ".tag{font-size:11px;font-weight:700;padding:4px 9px;border-radius:20px;white-space:nowrap;color:#fff}"
-    ".tag.direct{background:var(--green)}"
-    ".tag.relay{background:var(--blue)}"
-    ".tag.probing{background:var(--amber)}"
-    ".tag.none{background:var(--sigoff);color:var(--dim)}"
-    ".banner{background:var(--card);border-left:3px solid var(--blue);"
+    ".tag{font-size:11px;padding:4px 9px;border-radius:20px;white-space:nowrap}"
+    ".tag.direct{background:rgba(34,197,94,.16);color:var(--green)}"
+    ".tag.relay{background:rgba(59,130,246,.16);color:var(--blue)}"
+    ".tag.probing{background:rgba(245,158,11,.18);color:var(--amber)}"
+    ".tag.none{background:rgba(125,139,153,.12);color:var(--dim)}"
+    ".banner{background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.4);"
     "border-radius:12px;padding:14px 16px;margin-bottom:14px}"
     ".banner a{color:var(--blue);font-weight:500}"
     "label.f{display:block;margin:14px 0 5px;color:var(--dim);font-size:13px}"
-    "label{display:block;margin:14px 0 5px;color:var(--dim);font-size:13px}"
-    "p.sub{color:var(--dim);font-size:13px;margin:0 0 4px;line-height:1.5}"
     "input,select{width:100%;padding:12px;font-size:16px;border:1px solid var(--line);"
-    "border-radius:10px;background:var(--bg);color:var(--fg)}"
-    "button{width:100%;margin-top:20px;padding:13px;font-size:15px;font-weight:600;"
-    "border:0;border-radius:12px;background:var(--blue);color:#fff}"
+    "border-radius:10px;background:var(--card);color:var(--fg)}"
+    "button{width:100%;margin-top:20px;padding:13px;font-size:15px;font-weight:500;"
+    "border:0;border-radius:10px;background:var(--blue);color:#fff}"
     "button.danger{background:transparent;border:1px solid var(--line);color:var(--red);"
     "font-size:13px;padding:10px}"
     "button:disabled{opacity:.5}"
@@ -244,25 +239,6 @@ static const char CSS[] =
     "code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:var(--fg)}"
     "a{color:var(--blue);word-break:break-all}"
     "</style>";
-
-// Small line-icon set for the four Genel KPI cells - the only place icons earn
-// their byte cost, since the diagnostic panels run to 40+ fields and an icon
-// per row would bloat every page load for no real gain.
-#define ICON_DEVICES \
-    "<svg class=ic width=26 height=26 viewBox='0 0 24 24' fill=none stroke='var(--blue)' " \
-    "stroke-width=1.7 stroke-linecap=round stroke-linejoin=round>" \
-    "<rect x=3 y=7 width=11 height=8 rx=1.5/><rect x=10 y=4 width=11 height=8 rx=1.5/></svg>"
-#define ICON_BOLT \
-    "<svg class=ic width=26 height=26 viewBox='0 0 24 24' fill='var(--amber)' stroke=none>" \
-    "<path d='M13 2 4 14h6l-1 8 9-12h-6l1-8z'/></svg>"
-#define ICON_LOCK \
-    "<svg class=ic width=26 height=26 viewBox='0 0 24 24' fill=none stroke='var(--green)' " \
-    "stroke-width=1.7 stroke-linecap=round stroke-linejoin=round>" \
-    "<rect x=6 y=11 width=12 height=9 rx=2/><path d='M9 11V8a3 3 0 0 1 6 0v3'/></svg>"
-#define ICON_CLOCK \
-    "<svg class=ic width=26 height=26 viewBox='0 0 24 24' fill=none stroke='var(--dim)' " \
-    "stroke-width=1.7 stroke-linecap=round stroke-linejoin=round>" \
-    "<circle cx=12 cy=12 r=8/><path d='M12 8v4l3 2'/></svg>"
 
 // ------------------------------------------------------------- setup page
 
@@ -715,10 +691,10 @@ static esp_err_t get_status(httpd_req_t *req) {
     o += snprintf(page + o, cap - o,
         "<div class='panel p1'><div class=grid>"
         "%s%s"
-        "<div class='cell kpi'>" ICON_DEVICES "<div class=v>%d</div><div class=k>Bağlı cihaz</div></div>"
-        "<div class='cell kpi'>" ICON_BOLT "<div class=v>%d</div><div class=k>Doğrudan bağlanan</div></div>"
-        "<div class='cell kpi'>" ICON_LOCK "<div class=v>%d</div><div class=k>Şifreli tünel</div></div>"
-        "<div class='cell kpi'>" ICON_CLOCK "<div class=v>%s</div><div class=k>Çalışma süresi</div></div>"
+        "<div class=cell><div class=k>Bağlı cihaz</div><div class=v>%d<small> adet</small></div></div>"
+        "<div class=cell><div class=k>Doğrudan bağlanan</div><div class=v>%d<small> cihaz</small></div></div>"
+        "<div class=cell><div class=k>Şifreli tünel</div><div class=v>%d<small> açık</small></div></div>"
+        "<div class=cell><div class=k>Çalışma süresi</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Alınan paket</div><div class=v>%u</div></div>"
         "<div class=cell><div class=k>Gönderilen paket</div><div class=v>%u</div></div>"
         "</div></div>",
