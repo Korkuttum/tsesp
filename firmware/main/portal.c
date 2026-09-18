@@ -119,9 +119,9 @@ static const char LOGO[] =
 static const char CSS[] =
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<style>"
-    /* Follows whatever the phone or laptop is set to. The dark values stay
-       the default, so a browser that ignores the query still gets a readable
-       page rather than black text on a black ground. */
+    /* Follows whatever the phone or laptop is set to, unless the header
+       switch has set data-theme explicitly - that always wins, since a
+       reader who reached for the switch is not asking the OS again. */
     ":root{color-scheme:light dark;"
     "--bg:#0b0f14;--card:#141a21;--line:#1f2831;--dim:#7d8b99;--fg:#e6edf3;"
     "--track:#222c36;--sigoff:#2b3640;--hover:#1d252e;"
@@ -130,18 +130,75 @@ static const char CSS[] =
     "--bg:#f4f6f8;--card:#ffffff;--line:#e2e6ea;--dim:#68727d;--fg:#111820;"
     "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
     "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}}"
+    ":root[data-theme=dark]{"
+    "--bg:#0b0f14;--card:#141a21;--line:#1f2831;--dim:#7d8b99;--fg:#e6edf3;"
+    "--track:#222c36;--sigoff:#2b3640;--hover:#1d252e;"
+    "--blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444}"
+    ":root[data-theme=light]{"
+    "--bg:#f4f6f8;--card:#ffffff;--line:#e2e6ea;--dim:#68727d;--fg:#111820;"
+    "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
+    "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}"
     "*{box-sizing:border-box}"
-    "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:18px 14px 40px;"
+    "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:0 0 40px;"
     "background:var(--bg);color:var(--fg)}"
-    ".wrap{max-width:860px;margin:0 auto}"
+    ".wrap{max-width:860px;margin:0 auto;padding:18px 14px 0}"
     ".top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}"
     "h1{display:flex;align-items:center;font-size:19px;margin:0;letter-spacing:-.2px}"
     "h1 small{display:block;font-size:12px;color:var(--dim);font-weight:400;letter-spacing:0}"
     ".gear{color:var(--dim);text-decoration:none;font-size:20px;padding:7px 10px;"
     "border:1px solid var(--line);border-radius:9px;background:var(--card)}"
+    /* the sticky nav, styled after LuCI's - a dark bar in both themes, since
+       the page under it is what changes with the reader's theme, not the
+       bar telling them which tab they are on. */
+    ".luciheader{background:linear-gradient(#333,#222);position:sticky;top:0;z-index:800}"
+    ".luciheader-in{display:flex;align-items:stretch;max-width:860px;margin:0 auto;"
+    "padding:0 14px;flex-wrap:wrap}"
+    ".brand{color:#fff;font-size:17px;font-weight:600;padding:11px 14px 11px 0;"
+    "letter-spacing:-.2px;display:flex;align-items:center;gap:8px}"
+    ".brand svg{width:22px;height:22px;margin:0}"
+    ".luciheader nav{display:flex;align-self:stretch;flex:1}"
+    ".tabs input{position:absolute;opacity:0;pointer-events:none}"
+    ".luciheader nav label{color:#bfbfbf;padding:0 14px;font-size:13.5px;cursor:pointer;"
+    "display:flex;align-items:center;white-space:nowrap;border-radius:12px 12px 0 0;"
+    "margin-top:11px;position:relative}"
+    "#t1:checked~.luciheader nav label[for=t1],#t2:checked~.luciheader nav label[for=t2],"
+    "#t3:checked~.luciheader nav label[for=t3],#t4:checked~.luciheader nav label[for=t4],"
+    "#t5:checked~.luciheader nav label[for=t5]{background:var(--bg);color:var(--fg);font-weight:600}"
+    "#t1:checked~.luciheader nav label[for=t1]::before,#t1:checked~.luciheader nav label[for=t1]::after,"
+    "#t2:checked~.luciheader nav label[for=t2]::before,#t2:checked~.luciheader nav label[for=t2]::after,"
+    "#t3:checked~.luciheader nav label[for=t3]::before,#t3:checked~.luciheader nav label[for=t3]::after,"
+    "#t4:checked~.luciheader nav label[for=t4]::before,#t4:checked~.luciheader nav label[for=t4]::after,"
+    "#t5:checked~.luciheader nav label[for=t5]::before,#t5:checked~.luciheader nav label[for=t5]::after"
+    "{content:'';position:absolute;bottom:0;width:12px;height:12px}"
+    ".luciheader nav label[for=t1]::before,.luciheader nav label[for=t2]::before,"
+    ".luciheader nav label[for=t3]::before,.luciheader nav label[for=t4]::before,"
+    ".luciheader nav label[for=t5]::before{left:-12px;"
+    "background:radial-gradient(circle at top left,transparent 12px,var(--bg) 12px)}"
+    ".luciheader nav label[for=t1]::after,.luciheader nav label[for=t2]::after,"
+    ".luciheader nav label[for=t3]::after,.luciheader nav label[for=t4]::after,"
+    ".luciheader nav label[for=t5]::after{right:-12px;"
+    "background:radial-gradient(circle at top right,transparent 12px,var(--bg) 12px)}"
+    ".indicators{display:flex;align-items:center;padding:7px 0}"
+    ".theme-switch{position:relative;width:42px;height:23px;display:inline-block;"
+    "cursor:pointer;border-radius:999px}"
+    ".theme-switch input{position:absolute;opacity:0;width:0;height:0}"
+    ".ts-track{position:absolute;inset:0;background:rgba(255,255,255,.28);"
+    "border-radius:999px;transition:background .2s}"
+    ".ts-knob{position:absolute;left:3px;top:3px;width:17px;height:17px;border-radius:50%;"
+    "background:#fff;display:flex;align-items:center;justify-content:center;"
+    "transition:transform .25s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 3px rgba(0,0,0,.4)}"
+    ".ts-knob svg{position:absolute;width:11px;height:11px;transition:opacity .15s,transform .2s}"
+    ".ts-sun{color:#e8a33d;opacity:1;transform:scale(1) rotate(0)}"
+    ".ts-moon{color:#5b6b7a;opacity:0;transform:scale(.4) rotate(40deg)}"
+    /* checked means dark: the knob slides right and shows the moon, since
+       that is the theme now in effect, not the one a tap away. */
+    "#theme-toggle:checked~.ts-track{background:#2a8fd8}"
+    "#theme-toggle:checked~.ts-track .ts-knob{transform:translateX(19px)}"
+    "#theme-toggle:checked~.ts-track .ts-knob .ts-moon{opacity:1;transform:scale(1) rotate(0)}"
+    "#theme-toggle:checked~.ts-track .ts-knob .ts-sun{opacity:0;transform:scale(.4) rotate(-40deg)}"
     /* the headline strip */
     ".hero{background:var(--card);border:1px solid var(--line);border-radius:14px;"
-    "padding:16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
+    "padding:16px;margin:18px 0 14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
     ".dot{width:11px;height:11px;border-radius:50%;flex:0 0 11px}"
     ".dot.ok{background:var(--green);box-shadow:0 0 0 4px rgba(34,197,94,.16)}"
     ".dot.warn{background:var(--amber);box-shadow:0 0 0 4px rgba(245,158,11,.16)}"
@@ -150,33 +207,49 @@ static const char CSS[] =
     ".hero .st{font-weight:600}"
     ".hero .addr{margin-left:auto;font-family:ui-monospace,Menlo,monospace;"
     "font-size:14px;color:var(--dim)}"
-    /* tabs, done with radios so switching needs no script */
-    ".tabs input{position:absolute;opacity:0;pointer-events:none}"
-    ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
-    "border-radius:11px;padding:4px;margin-bottom:14px;overflow-x:auto}"
-    ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:8px;"
-    "font-size:14px;color:var(--dim);white-space:nowrap;cursor:pointer}"
     ".panel{display:none}"
-    "#t1:checked~.tabbar label[for=t1],#t2:checked~.tabbar label[for=t2],"
-    "#t3:checked~.tabbar label[for=t3],#t4:checked~.tabbar label[for=t4],"
-    "#t5:checked~.tabbar label[for=t5]{background:var(--blue);color:#fff}"
-    "#t1:checked~.panels .p1,#t2:checked~.panels .p2,"
-    "#t3:checked~.panels .p3,#t4:checked~.panels .p4,"
-    "#t5:checked~.panels .p5{display:block}"
-    /* cards */
-    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
-    "@media(min-width:620px){.grid{grid-template-columns:1fr 1fr 1fr}}"
-    ".cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}"
-    ".cell .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}"
-    ".cell .v{font-size:17px;margin-top:4px;font-variant-numeric:tabular-nums;"
-    "font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
-    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;white-space:nowrap}"
+    "#t1:checked~.wrap .panels .p1,#t2:checked~.wrap .panels .p2,"
+    "#t3:checked~.wrap .panels .p3,#t4:checked~.wrap .panels .p4,"
+    "#t5:checked~.wrap .panels .p5{display:block}"
+    /* Genel: one card per topic, icon and title on top - an overview, not a
+       diagnostic. The detail tabs below use .grid/.cell instead. */
+    ".cardgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}"
+    "@media(max-width:640px){.cardgrid{grid-template-columns:1fr}}"
+    ".card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}"
+    ".card .ic{display:block;margin:0 auto 10px}"
+    ".card h2{margin:0 0 12px;font-size:16px;font-weight:700;text-align:center;"
+    "text-transform:none;letter-spacing:-.2px;color:var(--fg)}"
+    ".card hr{border:0;border-top:1px solid var(--line);margin:0}"
+    ".rowline{display:flex;align-items:baseline;gap:8px;padding:8px 0;font-size:14px;"
+    "border-bottom:1px solid var(--line)}"
+    ".rowline:last-child{border-bottom:0}"
+    ".rowline .k{color:var(--dim)}"
+    ".rowline .v{margin-left:auto;text-align:right;font-weight:600;"
+    "font-family:ui-monospace,Menlo,monospace;font-size:14px}"
+    ".pill{font-size:11px;font-weight:700;color:#fff;padding:3px 9px;border-radius:9px;"
+    "white-space:nowrap}"
+    ".pill.ok{background:var(--green)}.pill.warn{background:var(--amber)}"
+    ".pill.bad{background:var(--red)}"
+    /* Ağ/Sistem/Ayarlar: one bordered card of stacked rows rather than a grid
+       of little boxes - the same .cell markup the C side already emits, so
+       this is a pure reskin with no change to how a panel is built. */
+    ".grid{background:var(--card);border:1px solid var(--line);border-radius:14px;"
+    "padding:2px 14px;margin-bottom:4px}"
+    ".cell{display:flex;align-items:baseline;gap:10px;padding:10px 0;"
+    "border-bottom:1px solid var(--line)}"
+    ".cell:last-child{border-bottom:0}"
+    ".cell.wide{flex-wrap:wrap}"
+    ".cell .k{color:var(--dim);font-size:13.5px}"
+    ".cell .v{margin-left:auto;text-align:right;font-size:14px;"
+    "font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;"
+    "word-break:break-all;font-weight:600}"
+    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;"
+    "font-weight:400;white-space:nowrap}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
        value anyway. */
     ".cell .v.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-    ".cell.wide{grid-column:1/-1}"
     ".cp{flex:0 0 auto;background:none;border:0;color:var(--dim);cursor:pointer;"
     "padding:3px;width:auto;margin:0;border-radius:6px;display:inline-flex;"
     "align-items:center}"
@@ -186,7 +259,7 @@ static const char CSS[] =
     ".cp.sm:hover{opacity:1;background:none}"
     ".cp.sm svg{width:13px;height:13px}"
     "h2{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;"
-    "margin:18px 0 8px}"
+    "margin:22px 0 8px}"
     "h2:first-child{margin-top:0}"
     ".hint{color:var(--dim);font-size:12.5px;margin:-4px 0 10px;line-height:1.45}"
     /* meters */
@@ -278,7 +351,7 @@ static esp_err_t get_setup(httpd_req_t *req) {
     mark_active();
     uint16_t n = 0;
     wifi_ap_record_t *aps = NULL;
-    char *page = malloc(8192);
+    char *page = malloc(16384);
     size_t o = 0;
 
     if (!page) return httpd_resp_send_500(req);
@@ -300,7 +373,7 @@ static esp_err_t get_setup(httpd_req_t *req) {
         else n = 0;
     }
 
-    o += snprintf(page + o, 8192 - o,
+    o += snprintf(page + o, 16384 - o,
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp kurulum</title>%s"
         "<div class=wrap><h1>%s tsesp</h1>"
         "<p class=sub>Cihazi ev agina bagla</p>"
@@ -312,12 +385,12 @@ static esp_err_t get_setup(httpd_req_t *req) {
         char esc[80];
         html_escape(esc, sizeof(esc), (const char *)aps[i].ssid);
         if (esc[0])
-            o += snprintf(page + o, 8192 - o, "<option value=\"%s\">%s (%d dBm)</option>",
+            o += snprintf(page + o, 16384 - o, "<option value=\"%s\">%s (%d dBm)</option>",
                           esc, esc, aps[i].rssi);
     }
     free(aps);
 
-    o += snprintf(page + o, 8192 - o,
+    o += snprintf(page + o, 16384 - o,
         "</select>"
         // A scan can come back empty, and hidden networks never show up at
         // all, so typing the name has to stay possible.
@@ -524,6 +597,40 @@ static void meter(char *out, size_t cap, int pct) {
     "stroke-linecap=round stroke-linejoin=round width=15 height=15>" \
     "<path d='M4 12.5l5 5L20 6.5'/></svg>"
 
+// The four Genel-tab card icons and the header's day/night toggle. All
+// static markup, no data in them, so they cost an argument slot nowhere.
+#define ICON_GLOBE \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#3fae52 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<circle cx=12 cy=12 r=10 /><path d='M2 12h20'/>" \
+    "<path d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 " \
+    "15.3 15.3 0 0 1 4-10z'/></svg>"
+#define ICON_WIFI2 \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#2a8fd8 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<path d='M5 13a10 10 0 0 1 14 0'/><path d='M8.5 16.5a5 5 0 0 1 7 0'/>" \
+    "<path d='M2 8.82a15 15 0 0 1 20 0'/><line x1=12 y1=20 x2=12.01 y2=20 /></svg>"
+#define ICON_SYS \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#f0ad4e " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<rect x=2 y=2 width=20 height=8 rx=2 /><rect x=2 y=14 width=20 height=8 rx=2 />" \
+    "<line x1=6 y1=6 x2=6.01 y2=6 /><line x1=6 y1=18 x2=6.01 y2=18 /></svg>"
+#define ICON_DEVS \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#14b8a6 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx=9 cy=7 r=4 />" \
+    "<path d='M22 21v-2a4 4 0 0 0-3-3.87'/><path d='M16 3.13a4 4 0 0 1 0 7.75'/></svg>"
+// Checked means dark. The sun sits still until then, so the icon that shows
+// always names the theme you are looking at rather than the one a click away.
+#define ICON_SUN \
+    "<svg class=ts-sun viewBox='0 0 24 24' fill=none stroke=currentColor " \
+    "stroke-width=2.2 stroke-linecap=round><circle cx=12 cy=12 r=4 />" \
+    "<path d='M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2" \
+    "M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'/></svg>"
+#define ICON_MOON \
+    "<svg class=ts-moon viewBox='0 0 24 24' fill=currentColor>" \
+    "<path d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/></svg>"
+
 // Enough for the wrapper, a label, an escaped value and the icon. Getting
 // this wrong is not a cosmetic problem: a cell cut off mid-tag leaves the
 // document's divs unbalanced, which nests everything that follows inside it
@@ -573,6 +680,21 @@ static const char *bare_addr(const char *addr, char *buf, size_t cap) {
     return buf;
 }
 
+// The same classification the peer list and the Genel-tab preview both need:
+// a direct path beats a relay, a relay beats a disco probe still in flight.
+static void peer_tag(char *tag, size_t cap, peer_entry *e) {
+    const ts_path *best = magic_best_for(e);
+    if (best)
+        snprintf(tag, cap, "<span class='tag direct'>doğrudan %u ms</span>",
+                 best->latency_ms);
+    else if (e->has_node_key && derp_task_connected())
+        snprintf(tag, cap, "<span class='tag relay'>dolaylı</span>");
+    else if (e->has_disco && e->nendpoints)
+        snprintf(tag, cap, "<span class='tag probing'>bağlanıyor</span>");
+    else
+        snprintf(tag, cap, "<span class='tag none'>bağlantı yok</span>");
+}
+
 static esp_err_t get_status(httpd_req_t *req) {
     // The panels are rendered in order and the settings one is last, so when
     // this runs out it is the update form that disappears - the one control
@@ -581,11 +703,11 @@ static esp_err_t get_status(httpd_req_t *req) {
     size_t cap = 28672, o = 0;
     char ip[16], up[24], esc[520], pub[64], wifi_ssid[36];
     char sig[240], m1[96], m2[96], m3[96];
-    // Static, not on the stack: five of these is nearly 4 KB, and the HTTP
-    // server's task does not have that to spare. The server handles one
-    // request at a time, so sharing them is safe.
-    static char c1[COPY_CELL_MAX], c2[COPY_CELL_MAX], c3[COPY_CELL_MAX];
-    static char c4[COPY_CELL_MAX], c5[COPY_CELL_MAX];
+    // Static, not on the stack: three of these plus the device row list is
+    // nearly 4 KB, and the HTTP server's task does not have that to spare.
+    // The server handles one request at a time, so sharing them is safe.
+    static char c2[COPY_CELL_MAX], c3[COPY_CELL_MAX], c4[COPY_CELL_MAX];
+    static char devrows[1200];
     char bare[48];
     const char *dot = "warn";
     int rssi = 0, channel = 0, bars, core0 = -1, core1 = -1;
@@ -660,9 +782,22 @@ static esp_err_t get_status(httpd_req_t *req) {
 
     o += snprintf(page + o, cap - o,
         "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp</title>%s"
+        "<div class=tabs>"
+        "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
+        "<input type=radio name=tab id=t3><input type=radio name=tab id=t4>"
+        "<input type=radio name=tab id=t5>"
+        "<div class=luciheader><div class=luciheader-in>"
+        "<span class=brand>%stsesp</span>"
+        "<nav><label for=t1>Genel</label><label for=t2>Ağ</label>"
+        "<label for=t3>Cihazlar</label><label for=t4>Sistem</label>"
+        "<label for=t5>Ayarlar</label></nav>"
+        "<div class=indicators><label class=theme-switch title='Karanlık tema'>"
+        "<input type=checkbox id=theme-toggle onchange=\"document.documentElement"
+        ".setAttribute('data-theme',this.checked?'dark':'light')\">"
+        "<span class=ts-track><span class=ts-knob>" ICON_SUN ICON_MOON "</span></span>"
+        "</label></div>"
+        "</div></div>"
         "<div class=wrap>"
-        "<div class=top><h1>%s<span>tsesp<small>ESP32 üzerinde tailnet düğümü</small></span></h1>"
-        "</div>"
         "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
         "<span class=addr>%s</span></div>",
         CSS, LOGO, dot, state_text(s_status.state),
@@ -675,35 +810,71 @@ static esp_err_t get_status(httpd_req_t *req) {
             "<a href=\"%s\" target=_blank rel=noopener>%s</a></div>", esc, esc);
     }
 
-    o += snprintf(page + o, cap - o,
-        "<div class=tabs>"
-        "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
-        "<input type=radio name=tab id=t3><input type=radio name=tab id=t4>"
-        "<input type=radio name=tab id=t5>"
-        "<div class=tabbar>"
-        "<label for=t1>Genel</label><label for=t2>Ağ</label>"
-        "<label for=t3>Cihazlar</label><label for=t4>Sistem</label>"
-        "<label for=t5>Ayarlar</label></div>"
-        "<div class=panels>");
+    o += snprintf(page + o, cap - o, "<div class=panels>");
 
-    /* ---- Genel ---- */
+    /* ---- Genel: kart kart özet ---- */
     n = peers_count();
+    html_escape(esc, sizeof(esc), s_status.name && s_status.name[0] ? s_status.name : "-");
+    {
+        // Up to four, same as the mockup: this is a preview, not the list -
+        // that is what the Cihazlar tab is for.
+        size_t dr = 0;
+        int shown = 0;
+        devrows[0] = '\0';
+        if (n == 0)
+            dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
+                "<div class=rowline><span class=k>Henüz yok</span>"
+                "<span class=v>ağ haritası bekleniyor</span></div>");
+        for (i = 0; i < n && shown < 4 && sizeof(devrows) - dr > 300; i++) {
+            peer_entry *e = peers_at(i);
+            char nm2[TS_NAME_STR * 2], tag2[80];
+            if (!e) continue;
+            peer_tag(tag2, sizeof(tag2), e);
+            html_escape(nm2, sizeof(nm2), e->name[0] ? e->name : "(isimsiz)");
+            dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
+                "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>",
+                nm2, tag2);
+            shown++;
+        }
+    }
     o += snprintf(page + o, cap - o,
-        "<div class='panel p1'><div class=grid>"
-        "%s%s"
-        "<div class=cell><div class=k>Bağlı cihaz</div><div class=v>%d<small> adet</small></div></div>"
-        "<div class=cell><div class=k>Doğrudan bağlanan</div><div class=v>%d<small> cihaz</small></div></div>"
-        "<div class=cell><div class=k>Şifreli tünel</div><div class=v>%d<small> açık</small></div></div>"
-        "<div class=cell><div class=k>Çalışma süresi</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Alınan paket</div><div class=v>%u</div></div>"
-        "<div class=cell><div class=k>Gönderilen paket</div><div class=v>%u</div></div>"
+        "<div class='panel p1'><div class=cardgrid>"
+        "<div class=card>" ICON_GLOBE "<h2>Tailnet</h2><hr>"
+        "<div class=rowline><span class=k>Cihaz adı</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Tailscale adresi</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Bağlı cihaz</span><span class=v>%d</span></div>"
+        "<div class=rowline><span class=k>Doğrudan bağlanan</span><span class=v>%d</span></div>"
+        "<div class=rowline><span class=k>Şifreli tünel</span><span class=v>%d</span></div>"
+        "<div class=rowline><span class=k>Çalışma süresi</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Alınan paket</span><span class=v>%u</span></div>"
+        "<div class=rowline><span class=k>Gönderilen paket</span><span class=v>%u</span></div>"
+        "</div>"
+        "<div class=card>" ICON_WIFI2 "<h2>Wi-Fi</h2><hr>"
+        "<div class=rowline><span class=k>Bağlı olduğu ağ</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Sinyal</span><span class=v>%s%d<small> dBm, %s</small></span></div>"
+        "<div class=rowline><span class=k>Ev ağındaki adresi</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Paylaşılan ev ağı</span><span class=v>%s</span></div>"
+        "</div>"
+        "<div class=card>" ICON_SYS "<h2>Sistem</h2><hr>"
+        "<div class=rowline><span class=k>Yazılım sürümü</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>Çekirdek 1</span><span class=v>%d<small> %%</small></span></div>"
+        "<div class=rowline><span class=k>Çekirdek 2</span><span class=v>%d<small> %%</small></span></div>"
+        "<div class=rowline><span class=k>Bellek</span><span class=v>%u/%u<small> KB</small></span></div>"
+        "</div>"
+        "<div class=card>" ICON_DEVS "<h2>Bağlı Cihazlar</h2><hr>%s</div>"
         "</div></div>",
-        (copy_cell_ex(c5, sizeof(c5), "Cihaz adı",
-                      s_status.name && s_status.name[0] ? s_status.name : "-", 1), c5),
-        (copy_cell(c1, sizeof(c1), "Tailscale adresi",
-                   bare_addr(s_status.tailnet_addr, bare, sizeof(bare))), c1),
-        n, s_status.paths_up, magic_tunnels_up(),
-        uptime_str(up, sizeof(up)), (unsigned)tun_in, (unsigned)tun_out);
+        esc, bare_addr(s_status.tailnet_addr, bare, sizeof(bare)),
+        n, s_status.paths_up, magic_tunnels_up(), uptime_str(up, sizeof(up)),
+        (unsigned)tun_in, (unsigned)tun_out,
+        wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), ip,
+        s_status.route[0] ?
+            (s_status.route_approved > 0 ? "<span class='pill ok'>onaylı</span>" :
+             s_status.route_approved == 0 ? "<span class='pill warn'>onay bekliyor</span>" :
+             "<span class='pill warn'>bilinmiyor</span>")
+            : "-",
+        desc ? desc->version : "?", core0 < 0 ? 0 : core0, core1 < 0 ? 0 : core1,
+        (unsigned)((heap_total - heap_free) / 1024), (unsigned)(heap_total / 1024),
+        devrows);
 
     /* ---- Ag ---- */
     o += snprintf(page + o, cap - o,
@@ -775,20 +946,10 @@ static esp_err_t get_status(httpd_req_t *req) {
             "<span>ağ haritası bekleniyor</span></div></div>");
     for (i = 0; i < n && cap - o > 700; i++) {
         peer_entry *e = peers_at(i);
-        const ts_path *best;
         char nm[TS_NAME_STR * 2], tag[80];
         if (!e) continue;
 
-        best = magic_best_for(e);
-        if (best)
-            snprintf(tag, sizeof(tag), "<span class='tag direct'>doğrudan %u ms</span>",
-                     best->latency_ms);
-        else if (e->has_node_key && derp_task_connected())
-            snprintf(tag, sizeof(tag), "<span class='tag relay'>dolaylı</span>");
-        else if (e->has_disco && e->nendpoints)
-            snprintf(tag, sizeof(tag), "<span class='tag probing'>bağlanıyor</span>");
-        else
-            snprintf(tag, sizeof(tag), "<span class='tag none'>bağlantı yok</span>");
+        peer_tag(tag, sizeof(tag), e);
 
         html_escape(nm, sizeof(nm), e->name[0] ? e->name : "(isimsiz)");
         bare_addr(e->addr, bare, sizeof(bare));
