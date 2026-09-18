@@ -186,6 +186,12 @@ static const char CSS[] =
     ".luciheader nav label[for=t3]::after,.luciheader nav label[for=t4]::after,"
     ".luciheader nav label[for=t5]::after{right:-12px;"
     "background:radial-gradient(circle at top right,transparent 12px,var(--bg) 12px)}"
+    /* Narrow enough that brand + tabs + switch cannot share one line: the
+       switch used to be whichever item happened to wrap, landing under the
+       tabs. Give the tabs their own full-width row instead, so brand and
+       switch always keep the first one. */
+    "@media(max-width:640px){.luciheader nav{order:3;flex:0 0 100%;"
+    "overflow-x:auto;margin-top:2px}}"
     ".indicators{display:flex;align-items:center;padding:7px 0}"
     ".theme-switch{position:relative;width:42px;height:23px;display:inline-block;"
     "cursor:pointer;border-radius:999px}"
@@ -815,8 +821,15 @@ static esp_err_t get_status(httpd_req_t *req) {
         // The switch itself has no opinion until touched - it should still
         // show the theme the page actually opened in, which is dark unless
         // the browser asked for light (the same rule the CSS above follows).
-        "<script>document.getElementById('theme-toggle').checked="
-        "!matchMedia('(prefers-color-scheme:light)').matches</script>"
+        // It keeps following the device if that changes while the page is
+        // still open, but only until a tap sets data-theme explicitly -
+        // from there the switch is the reader's own choice, not the OS's.
+        "<script>(function(){"
+        "var m=matchMedia('(prefers-color-scheme:light)'),t=document.getElementById('theme-toggle');"
+        "t.checked=!m.matches;"
+        "m.addEventListener('change',function(e){"
+        "if(!document.documentElement.hasAttribute('data-theme'))t.checked=!e.matches});"
+        "})()</script>"
         "</div></div>"
         "<div class=wrap>"
         "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
