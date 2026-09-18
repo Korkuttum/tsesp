@@ -1125,9 +1125,16 @@ static esp_err_t get_status(httpd_req_t *req) {
         "window.OB=1;const f=e.target.files[0],l=document.getElementById('fwl');"
         "if(f&&l){l.textContent=f.name+' - '+Math.round(f.size/1024)+' KB';"
         "l.classList.add('has')}});"
+        // Checking OB only here left a gap the width of the fetch itself: pick
+        // a file while a refresh already in flight, and it lands anyway once
+        // the awaits resolve, rebuilding <input type=file> from scratch and
+        // silently dropping the choice. Checking again after every await
+        // closes that window instead of just narrowing it.
         "setInterval(async()=>{if(window.OB)return;try{"
         "const r=await fetch('/',{cache:'no-store'});"
-        "const d=new DOMParser().parseFromString(await r.text(),'text/html');"
+        "const t=await r.text();if(window.OB)return;"
+        "const d=new DOMParser().parseFromString(t,'text/html');"
+        "if(window.OB)return;"
         "for(const s of ['.hero','.panels']){"
         "const a=document.querySelector(s),b=d.querySelector(s);"
         "if(a&&b)a.innerHTML=b.innerHTML;}"
