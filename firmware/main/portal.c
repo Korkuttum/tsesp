@@ -884,8 +884,6 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=rowline><span class=k>Cihaz adı</span><span class=v>%s</span></div>"
         "<div class=rowline><span class=k>Tailscale adresi</span><span class=v>%s</span></div>"
         "<div class=rowline><span class=k>Bağlı cihaz</span><span class=v>%d</span></div>"
-        "<div class=rowline><span class=k>Doğrudan bağlanan</span><span class=v>%d</span></div>"
-        "<div class=rowline><span class=k>Şifreli tünel</span><span class=v>%d</span></div>"
         "<div class=rowline><span class=k>Çalışma süresi</span><span class=v>%s</span></div>"
         "<div class=rowline><span class=k>Alınan paket</span><span class=v>%u</span></div>"
         "<div class=rowline><span class=k>Gönderilen paket</span><span class=v>%u</span></div>"
@@ -905,7 +903,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=card>" ICON_DEVS "<h2>Bağlı Cihazlar</h2><hr>%s</div>"
         "</div></div>",
         esc, bare_addr(s_status.tailnet_addr, bare, sizeof(bare)),
-        n, s_status.paths_up, magic_tunnels_up(), uptime_str(up, sizeof(up)),
+        n, uptime_str(up, sizeof(up)),
         (unsigned)tun_in, (unsigned)tun_out,
         wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), ip,
         s_status.route[0] ?
@@ -953,6 +951,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Giriş kancası çalıştı</div><div class=v>%u<small> kez</small></div></div>"
         "</div>"
         "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
+        "<div class=cell><div class=k>Doğrudan bağlanan</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>Şifreli tünel</div><div class=v>%d</div></div>"
         "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Bağlantı denemesi</div><div class=v>%u</div></div>"
         "<div class=cell><div class=k>Gelen yanıt</div><div class=v>%u</div></div>"
@@ -975,6 +975,7 @@ static esp_err_t get_status(httpd_req_t *req) {
         (unsigned)wo_total, (unsigned)wo_lan, (unsigned)fwd_wifi, (unsigned)fwd_ans,
         (unsigned)nat_o, (unsigned)nat_i, (unsigned)nat_miss, nat_n,
         (unsigned)cb_in, (unsigned)cb_out, (unsigned)in_calls,
+        s_status.paths_up, magic_tunnels_up(),
         derp_task_connected() ? derp_task_region_name() : "bağlı değil",
         (unsigned)pings, (unsigned)pongs,
         (unsigned)derp_tx, (unsigned)derp_rx);
