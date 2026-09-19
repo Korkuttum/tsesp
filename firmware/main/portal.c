@@ -53,6 +53,29 @@ static void html_escape(char *out, size_t cap, const char *in) {
     out[o] = '\0';
 }
 
+// Same idea as html_escape, for the one JSON response: a device name or SSID
+// is whatever the router or the tailnet admin typed, not something this
+// firmware controls.
+static void json_escape(char *out, size_t cap, const char *in) {
+    size_t o = 0;
+    for (; *in && o + 2 < cap; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            if (o + 3 >= cap) break;
+            out[o++] = '\\'; out[o++] = (char)c;
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            if (o + 3 >= cap) break;
+            out[o++] = '\\';
+            out[o++] = c == '\n' ? 'n' : c == '\r' ? 'r' : 't';
+        } else if (c < 0x20) {
+            continue; // other control bytes have no JSON escape worth the space
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
 static int hexval(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -1223,6 +1246,88 @@ static esp_err_t get_settings(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// A machine-readable snapshot of the same numbers the dashboard already
+// computes, for Home Assistant or anything else that wants to poll rather
+// than parse HTML. Nothing here is gathered for a second reason - it is the
+// status page's own accessor calls, just written out as JSON.
+static esp_err_t get_api_status(httpd_req_t *req) {
+    char *page = malloc(1536);
+    size_t cap = 1536, o = 0;
+    char ip[16], wifi_ssid[36], nm[128], ssid_esc[72];
+    char route_cidr[48], derp_region[80], bare[48];
+    int rssi = 0, channel = 0, core0 = -1, core1 = -1;
+    uint32_t link_reconnects = 0, tun_in = 0, tun_out = 0;
+    esp_chip_info_t chip;
+    size_t heap_free, heap_total;
+    const esp_app_desc_t *desc = esp_app_get_description();
+    const char *reset_tok, *approved_str, *derp_connected_str;
+
+    if (!page) return httpd_resp_send_500(req);
+
+    net_get_ip(ip, sizeof(ip));
+    net_get_wifi_info(wifi_ssid, sizeof(wifi_ssid), &rssi, &channel);
+    net_get_link_stats(&link_reconnects, NULL);
+    tun_stats(&tun_in, &tun_out);
+    cpu_load(&core0, &core1);
+    esp_chip_info(&chip);
+    heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    heap_total = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+
+    json_escape(nm, sizeof(nm), s_status.name && s_status.name[0] ? s_status.name : "");
+    json_escape(ssid_esc, sizeof(ssid_esc), wifi_ssid);
+
+    if (s_status.route[0]) snprintf(route_cidr, sizeof(route_cidr), "\"%s\"", s_status.route);
+    else snprintf(route_cidr, sizeof(route_cidr), "null");
+    approved_str = !s_status.route[0] ? "null" : s_status.route_approved > 0 ? "true" :
+                   s_status.route_approved == 0 ? "false" : "null";
+
+    if (derp_task_connected())
+        snprintf(derp_region, sizeof(derp_region), "\"%s\"", derp_task_region_name());
+    else snprintf(derp_region, sizeof(derp_region), "null");
+    derp_connected_str = derp_task_connected() ? "true" : "false";
+
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   reset_tok = "poweron"; break;
+    case ESP_RST_SW:        reset_tok = "sw"; break;
+    case ESP_RST_PANIC:     reset_tok = "panic"; break;
+    case ESP_RST_INT_WDT:   reset_tok = "int_wdt"; break;
+    case ESP_RST_TASK_WDT:  reset_tok = "task_wdt"; break;
+    case ESP_RST_WDT:       reset_tok = "wdt"; break;
+    case ESP_RST_BROWNOUT:  reset_tok = "brownout"; break;
+    case ESP_RST_DEEPSLEEP: reset_tok = "deepsleep"; break;
+    case ESP_RST_EXT:       reset_tok = "ext"; break;
+    default:                reset_tok = "unknown"; break;
+    }
+
+    o += snprintf(page + o, room(cap, o),
+        "{\"state\":\"%s\",\"uptime_s\":%u,"
+        "\"tailnet\":{\"address\":\"%s\",\"name\":\"%s\",\"peers\":%d,"
+        "\"direct\":%d,\"tunnels\":%d,\"packets_rx\":%u,\"packets_tx\":%u},"
+        "\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"channel\":%d,"
+        "\"reconnects\":%u,\"local_ip\":\"%s\"},"
+        "\"route\":{\"cidr\":%s,\"approved\":%s},"
+        "\"system\":{\"version\":\"%s\",\"chip\":\"%s\","
+        "\"cpu0_pct\":%d,\"cpu1_pct\":%d,"
+        "\"heap_free_kb\":%u,\"heap_total_kb\":%u,\"reset_reason\":\"%s\"},"
+        "\"derp\":{\"region\":%s,\"connected\":%s}}",
+        s_status.state ? s_status.state : "unknown",
+        (unsigned)(esp_timer_get_time() / 1000000),
+        bare_addr(s_status.tailnet_addr, bare, sizeof(bare)), nm,
+        peers_count(), s_status.paths_up, magic_tunnels_up(),
+        (unsigned)tun_in, (unsigned)tun_out,
+        ssid_esc, rssi, channel, (unsigned)link_reconnects, ip,
+        route_cidr, approved_str,
+        desc ? desc->version : "?", chip_name(&chip),
+        core0 < 0 ? 0 : core0, core1 < 0 ? 0 : core1,
+        (unsigned)(heap_free / 1024), (unsigned)(heap_total / 1024), reset_tok,
+        derp_region, derp_connected_str);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, page, o);
+    free(page);
+    return ESP_OK;
+}
+
 // Rejoining the tailnet without redoing Wi-Fi. Useful whenever the node's
 // registration needs replacing - a changed capability version, an expired
 // key - and much less drastic than forgetting everything.
@@ -1398,6 +1503,7 @@ esp_err_t portal_start(bool captive) {
         httpd_uri_t forget = { .uri = "/forget", .method = HTTP_POST, .handler = post_forget };
         httpd_uri_t settings = { .uri = "/settings", .method = HTTP_GET, .handler = get_settings };
         httpd_uri_t rejoin = { .uri = "/rejoin", .method = HTTP_POST, .handler = post_rejoin };
+        httpd_uri_t api = { .uri = "/api/status", .method = HTTP_GET, .handler = get_api_status };
         // Registered in setup mode too: a device that cannot join any network
         // can still be re-flashed by joining its own, which is one fewer
         // reason to need a cable.
@@ -1412,6 +1518,7 @@ esp_err_t portal_start(bool captive) {
         httpd_register_uri_handler(s_server, &forget);
         if (!captive) httpd_register_uri_handler(s_server, &settings);
         if (!captive) httpd_register_uri_handler(s_server, &rejoin);
+        if (!captive) httpd_register_uri_handler(s_server, &api);
         httpd_register_uri_handler(s_server, &ota);
     }
 
