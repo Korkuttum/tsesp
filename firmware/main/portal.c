@@ -233,7 +233,12 @@ static const char CSS[] =
     ".card .ic{display:block;margin:0 auto 10px}"
     ".card h2{margin:0 0 12px;font-size:16px;font-weight:700;text-align:center;"
     "text-transform:none;letter-spacing:-.2px;color:var(--fg)}"
+    ".card h2 .count{color:var(--dim);font-weight:400;font-size:13px}"
     ".card hr{border:0;border-top:1px solid var(--line);margin:0}"
+    /* Every peer goes in now, not just the first four - once that outgrows a
+       comfortable card height it scrolls in place instead of pushing the
+       whole cardgrid row out of line with its neighbours. */
+    ".scrollList{max-height:230px;overflow-y:auto}"
     ".rowline{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:8px 0;"
     "font-size:14px;border-bottom:1px solid var(--line)}"
     ".rowline:last-child{border-bottom:0}"
@@ -265,6 +270,10 @@ static const char CSS[] =
     /* A wide cell's value is a long comma-separated list, not a short number -
        give it its own full-width, left-aligned line under the label. */
     ".cell.wide .v{flex:0 0 100%;margin-left:0;text-align:left}"
+    ".miniList{flex:0 0 100%;margin:4px 0 0;padding:0;list-style:none}"
+    ".miniList li{padding:6px 0;font-family:ui-monospace,Menlo,monospace;"
+    "font-size:13px;border-top:1px solid var(--line)}"
+    ".miniList li:first-child{border-top:0;padding-top:2px}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
@@ -730,7 +739,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     // nearly 4 KB, and the HTTP server's task does not have that to spare.
     // The server handles one request at a time, so sharing them is safe.
     static char c2[COPY_CELL_MAX], c3[COPY_CELL_MAX], c4[COPY_CELL_MAX];
-    static char devrows[1200];
+    static char devrows[2400];
     char bare[48];
     const char *dot = "warn";
     int rssi = 0, channel = 0, bars, core0 = -1, core1 = -1;
@@ -743,7 +752,7 @@ static esp_err_t get_status(httpd_req_t *req) {
     bool tr_hooked = false;
     uint32_t wo_total = 0, wo_lan = 0, fwd_wifi = 0, fwd_ans = 0;
     uint32_t nat_o = 0, nat_i = 0, nat_miss = 0, cb_in = 0, cb_out = 0, in_calls = 0; int nat_n = 0;
-    char arp[240];
+    char arp[320];
     esp_chip_info_t chip;
     uint32_t flash = 0;
     const esp_partition_t *app = esp_ota_get_running_partition();
@@ -776,18 +785,17 @@ static esp_err_t get_status(httpd_req_t *req) {
     // no amount of routing code will help.
     {
         size_t i;
-        int n = 0;
-        arp[0] = '\0';
+        int n = 0, found = 0;
         for (i = 0; i < ARP_TABLE_SIZE; i++) {
             ip4_addr_t *ipa = NULL;
             struct netif *nif = NULL;
             struct eth_addr *eth = NULL;
             if (!etharp_get_entry(i, &ipa, &nif, &eth) || !ipa) continue;
-            n += snprintf(arp + n, sizeof(arp) - n, "%s%s", n ? ", " : "",
-                          ip4addr_ntoa(ipa));
-            if ((size_t)n >= sizeof(arp) - 20) break;
+            n += snprintf(arp + n, sizeof(arp) - n, "<li>%s</li>", ip4addr_ntoa(ipa));
+            found++;
+            if ((size_t)n >= sizeof(arp) - 30) break;
         }
-        if (!arp[0]) snprintf(arp, sizeof(arp), "hicbiri");
+        if (!found) snprintf(arp, sizeof(arp), "<li>hiçbiri</li>");
     }
     derp_task_stats(&derp_tx, &derp_rx);
     cpu_load(&core0, &core1);
@@ -851,16 +859,15 @@ static esp_err_t get_status(httpd_req_t *req) {
     n = peers_count();
     html_escape(esc, sizeof(esc), s_status.name && s_status.name[0] ? s_status.name : "-");
     {
-        // Up to four, same as the mockup: this is a preview, not the list -
-        // that is what the Cihazlar tab is for.
+        // Every peer, not a cap - the card itself scrolls once it runs out
+        // of room, instead of this list quietly cutting names off.
         size_t dr = 0;
-        int shown = 0;
         devrows[0] = '\0';
         if (n == 0)
             dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
                 "<div class=rowline><span class=k>Henüz yok</span>"
                 "<span class=v>ağ haritası bekleniyor</span></div>");
-        for (i = 0; i < n && shown < 4 && sizeof(devrows) - dr > 300; i++) {
+        for (i = 0; i < n && sizeof(devrows) - dr > 300; i++) {
             peer_entry *e = peers_at(i);
             char nm2[TS_NAME_STR * 2], tag2[80];
             if (!e) continue;
@@ -869,7 +876,6 @@ static esp_err_t get_status(httpd_req_t *req) {
             dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
                 "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>",
                 nm2, tag2);
-            shown++;
         }
     }
     // Computed again down in the Sistem tab, from the same core0/core1/heap
@@ -900,7 +906,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=rowline><span class=k>Çekirdek 2</span><span class=v>%d<small> %%</small></span>%s</div>"
         "<div class=rowline><span class=k>Bellek</span><span class=v>%u/%u<small> KB</small></span>%s</div>"
         "</div>"
-        "<div class=card>" ICON_DEVS "<h2>Bağlı Cihazlar</h2><hr>%s</div>"
+        "<div class=card>" ICON_DEVS "<h2>Bağlı Cihazlar <span class=count>%d</span></h2><hr>"
+        "<div class=scrollList>%s</div></div>"
         "</div></div>",
         esc, bare_addr(s_status.tailnet_addr, bare, sizeof(bare)),
         n, uptime_str(up, sizeof(up)),
@@ -913,7 +920,7 @@ static esp_err_t get_status(httpd_req_t *req) {
             : "-",
         desc ? desc->version : "?", core0 < 0 ? 0 : core0, m1, core1 < 0 ? 0 : core1, m2,
         (unsigned)((heap_total - heap_free) / 1024), (unsigned)(heap_total / 1024), m3,
-        devrows);
+        n, devrows);
 
     /* ---- Ag ---- */
     o += snprintf(page + o, room(cap, o),
@@ -934,7 +941,8 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Ağa çıkarılan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Rotası yok</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>Yığında düşen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell wide><div class=k>Ev ağında görülen cihazlar</div><div class=v>%s</div></div>"
+        "<div class=cell wide><div class=k>Ev ağında görülen cihazlar</div>"
+        "<ul class=miniList>%s</ul></div>"
         "<div class=cell><div class=k>Wi-Fi izleyici</div><div class=v>%s</div></div>"
         "<div class=cell><div class=k>Çevrilmemiş çıkan</div><div class=v>%u<small> paket</small></div></div>"
         "<div class=cell><div class=k>LAN'dan dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
