@@ -3,8 +3,12 @@
 A Tailscale client written from scratch for a classic ESP32 (520 KB SRAM, no
 PSRAM). `src/` and `include/` are portable C compiled for both the POSIX test
 harness and the ESP-IDF firmware; `firmware/main/` is the only ESP-specific
-code. README.md is in Turkish and is the project's record of what was measured
-and what was only assumed - keep that distinction when adding to it.
+code. README.md is in English (translated from the original Turkish once the
+repo went public) and is the project's record of what was measured and what
+was only assumed - keep that distinction when adding to it. The device panel
+itself (`firmware/main/portal.c`) is bilingual - every user-facing string goes
+through a `T(tr, en)` macro - so a new panel string needs both spellings, not
+just one.
 
 ## Building
 
@@ -47,7 +51,22 @@ identity, and `idf.py flash` leaves it alone.
   fits on the chip at all.
 - The status page is built into one heap buffer in `portal.c`; panels render in
   order, so overflowing it truncates the last tab. Count the format specifiers
-  against the arguments - they are long lists.
+  against the arguments - they are long lists. `clamp_len()` keeps a genuine
+  overflow from reading past the buffer, but it still means a missing cell,
+  not the tab you meant to render - compile with `-Wformat` (already the
+  default here) and treat any format warning as fatal; it is what actually
+  catches a missing or extra argument in one of these calls. A translated
+  string passed through `T(tr, en)` as a `%s` argument can never itself
+  contain a `%u`/`%d`/etc. - that format specifier has no argument list of
+  its own to draw from. Resolve it into its own small buffer first (see the
+  memory-hint code in `get_status` for the pattern) and pass the result as
+  the `%s`.
+- A same-origin browser `POST` (the language toggle, the OTA/rejoin/forget
+  forms) carries far more header bytes than `curl` ever sends - `sec-ch-ua`,
+  `Sec-Fetch-*`, a full `Referer`, a long `User-Agent`. `CONFIG_HTTPD_MAX_REQ_HDR_LEN`
+  needs real headroom (1536, currently) or `esp_http_server` rejects the
+  whole request with a 431 before any handler runs, and it only shows up
+  once something real - not curl - drives the form.
 
 ## Testing
 
