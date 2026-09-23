@@ -124,3 +124,15 @@ esp_err_t device_set_registered(bool yes) {
     uint8_t v = yes ? 1 : 0;
     return blob_set("reg", &v, sizeof(v));
 }
+
+bool device_lang_pref(bool *en) {
+    uint8_t v = 0;
+    if (blob_get("lang", &v, sizeof(v)) != ESP_OK) return false;
+    *en = (v == 1);
+    return true;
+}
+
+esp_err_t device_set_lang_en(bool en) {
+    uint8_t v = en ? 1 : 0;
+    return blob_set("lang", &v, sizeof(v));
+}

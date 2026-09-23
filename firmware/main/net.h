@@ -40,7 +40,7 @@ esp_err_t portal_start(bool captive);
 typedef struct {
     const char *state;
     const char *tailnet_addr;
-    const char *name;        // MagicDNS adı
+    const char *name;        // MagicDNS name
     const char *login_url;
     const char *route;       // the LAN we offer to route for
     // Whether control has approved that route: 1 yes, 0 advertised but not

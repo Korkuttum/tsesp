@@ -1,0 +1,57 @@
+name: Build firmware and attach it to the release
+
+# Runs when a GitHub Release is published, and can also be triggered by hand
+# (workflow_dispatch) to check that the build still succeeds without cutting
+# a release. host/*_test is a separate, offline-only suite (see CLAUDE.md);
+# this workflow only builds the ESP-IDF firmware image.
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # to attach the built .bin files to the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # firmware/sdkconfig is gitignored and never present in a fresh
+      # checkout, but a clean removal here matches the project's own build
+      # instructions (README/CLAUDE.md) in case a cache ever restores one:
+      # ESP-IDF only reads sdkconfig.defaults when sdkconfig doesn't exist.
+      - name: Remove any stale sdkconfig
+        run: rm -f firmware/sdkconfig
+
+      - name: Build with ESP-IDF v5.3.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32
+          path: firmware
+
+      - name: Collect release assets
+        run: |
+          set -e
+          mkdir -p out
+          cd firmware/build
+          # tsesp.bin is the app image the device's own /ota endpoint takes
+          # (see the comment above post_ota in firmware/main/portal.c); the
+          # other three are only needed for flashing a blank board from
+          # scratch alongside partitions.csv's offsets.
+          cp tsesp.bin bootloader/bootloader.bin partition_table/partition-table.bin ota_data_initial.bin ../../out/
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" out/*.bin --clobber
+        if: github.event_name == 'release'
+
+      - name: Upload as a workflow artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsesp-firmware
+          path: out/*.bin

@@ -1,6 +1,7 @@
 // The setup page, and the DNS trick that makes a phone open it by itself.
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_http_server.h"
@@ -35,6 +36,61 @@ static portal_status s_status = { .state = "starting", .tailnet_addr = "", .name
                                   .login_url = "", .route = "", .route_approved = -1,
                                   .peers = 0, .paths_up = 0 };
 
+// The panel's language. Read once from NVS at startup and kept here rather
+// than re-read on every request - it changes only through post_lang below,
+// which updates both the flash copy and this one together.
+static bool s_lang_en;
+
+// Every user-visible string in this file picks between its Turkish and
+// English spelling through this, tr first because that is what the device
+// shipped with and what device_lang_is_en() defaults to on a device that
+// has never touched /lang.
+#define T(tr, en) (s_lang_en ? (en) : (tr))
+
+// Once someone has actually picked a language it always wins - that's what
+// device_lang_pref() is for. Before that, the browser's own Accept-Language
+// is the only signal there is: "tr" or "tr-TR" (in whatever case, wherever
+// it falls in the header's comma list) means Turkish, anything else means
+// English. Nothing gets written to flash here; it is decided fresh on every
+// request until a POST to /lang settles it.
+static void resolve_lang(httpd_req_t *req) {
+    bool pref;
+    char al[64];
+
+    if (device_lang_pref(&pref)) { s_lang_en = pref; return; }
+
+    s_lang_en = true;
+    // A header longer than al[] still starts the same way, so a truncated
+    // read is just as usable here as a complete one - only the prefix matters.
+    esp_err_t err = httpd_req_get_hdr_value_str(req, "Accept-Language", al, sizeof(al));
+    if (err == ESP_OK || err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        // Only the FIRST tag counts - the list is already in preference
+        // order, so someone whose primary language is English and who
+        // merely lists Turkish as a fallback further down (or vice versa)
+        // still gets their actual first choice, not whichever tag a plain
+        // substring search happened to notice.
+        size_t taglen;
+        for (char *p = al; *p; p++) *p = (char)tolower((unsigned char)*p);
+        taglen = strcspn(al, ",;");
+        if (taglen >= 2 && al[0] == 't' && al[1] == 'r' &&
+            (taglen == 2 || al[2] == '-'))
+            s_lang_en = false;
+    }
+}
+
+// A tiny form that flips s_lang_en and lands back on "to". Used on every
+// page that has room for it - unlike the theme switch, this can't be a
+// client-side toggle, since the language lives in every string the server
+// already sent.
+#define LANG_TOGGLE_MAX 192
+static void lang_toggle(char *out, size_t cap, const char *to) {
+    snprintf(out, cap,
+        "<form class=langf method=POST action=/lang>"
+        "<input type=hidden name=to value='%s'>"
+        "<button name=lang value=%s class=langbtn>%s</button></form>",
+        to, s_lang_en ? "tr" : "en", s_lang_en ? "TR" : "EN");
+}
+
 void portal_set_status(const portal_status *s) { s_status = *s; }
 
 // ----------------------------------------------------------------- helpers
@@ -53,12 +109,50 @@ static void html_escape(char *out, size_t cap, const char *in) {
     out[o] = '\0';
 }
 
+// Same idea as html_escape, for the one JSON response: a device name or SSID
+// is whatever the router or the tailnet admin typed, not something this
+// firmware controls.
+static void json_escape(char *out, size_t cap, const char *in) {
+    size_t o = 0;
+    for (; *in && o + 2 < cap; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            if (o + 3 >= cap) break;
+            out[o++] = '\\'; out[o++] = (char)c;
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            if (o + 3 >= cap) break;
+            out[o++] = '\\';
+            out[o++] = c == '\n' ? 'n' : c == '\r' ? 'r' : 't';
+        } else if (c < 0x20) {
+            continue; // other control bytes have no JSON escape worth the space
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
 static int hexval(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
+
+// snprintf returns how much it WOULD have written, not how much fit - so once
+// a page's running offset passes its buffer's size, a plain "cap - o" wraps
+// past zero (both are size_t) into a huge count, and every call after that
+// believes it has nearly unlimited room and writes straight past the
+// allocation. A page that outgrows its buffer is expected to just lose its
+// last tab, not corrupt the heap; this is what keeps that true.
+static inline size_t room(size_t cap, size_t o) { return o < cap ? cap - o : 0; }
+
+// The same overflow, on the way out. o is the sum of what snprintf says it
+// WOULD have written, which keeps growing past cap once a page overflows -
+// room() only stops the writes themselves from wrapping. Sending o bytes out
+// of a cap-byte allocation past that point reads whatever heap sits after it,
+// which is a page that discloses stale memory, not just one missing a tab.
+static inline size_t clamp_len(size_t cap, size_t o) { return o < cap ? o : cap; }
 
 // Pulls one field out of an application/x-www-form-urlencoded body.
 static bool form_field(const char *body, const char *name, char *out, size_t cap) {
@@ -119,9 +213,9 @@ static const char LOGO[] =
 static const char CSS[] =
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<style>"
-    /* Follows whatever the phone or laptop is set to. The dark values stay
-       the default, so a browser that ignores the query still gets a readable
-       page rather than black text on a black ground. */
+    /* Follows whatever the phone or laptop is set to, unless the header
+       switch has set data-theme explicitly - that always wins, since a
+       reader who reached for the switch is not asking the OS again. */
     ":root{color-scheme:light dark;"
     "--bg:#0b0f14;--card:#141a21;--line:#1f2831;--dim:#7d8b99;--fg:#e6edf3;"
     "--track:#222c36;--sigoff:#2b3640;--hover:#1d252e;"
@@ -130,18 +224,107 @@ static const char CSS[] =
     "--bg:#f4f6f8;--card:#ffffff;--line:#e2e6ea;--dim:#68727d;--fg:#111820;"
     "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
     "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}}"
+    ":root[data-theme=dark]{"
+    "--bg:#0b0f14;--card:#141a21;--line:#1f2831;--dim:#7d8b99;--fg:#e6edf3;"
+    "--track:#222c36;--sigoff:#2b3640;--hover:#1d252e;"
+    "--blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444}"
+    ":root[data-theme=light]{"
+    "--bg:#f4f6f8;--card:#ffffff;--line:#e2e6ea;--dim:#68727d;--fg:#111820;"
+    "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
+    "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}"
     "*{box-sizing:border-box}"
-    "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:18px 14px 40px;"
+    // Keeps the scrollbar's own width part of the layout at all times, so a
+    // tab shorter than the viewport (no scrollbar) and one taller than it
+    // (scrollbar appears) don't leave .wrap's centering to land in two
+    // different places - the jump a reader saw when switching tabs.
+    "html{overflow-y:scroll}"
+    "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:0 0 40px;"
     "background:var(--bg);color:var(--fg)}"
-    ".wrap{max-width:860px;margin:0 auto}"
+    ".wrap{max-width:860px;margin:0 auto;padding:18px 14px 0}"
     ".top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}"
     "h1{display:flex;align-items:center;font-size:19px;margin:0;letter-spacing:-.2px}"
     "h1 small{display:block;font-size:12px;color:var(--dim);font-weight:400;letter-spacing:0}"
     ".gear{color:var(--dim);text-decoration:none;font-size:20px;padding:7px 10px;"
     "border:1px solid var(--line);border-radius:9px;background:var(--card)}"
+    /* the sticky nav, styled after LuCI's - a dark bar in both themes, since
+       the page under it is what changes with the reader's theme, not the
+       bar telling them which tab they are on. */
+    ".luciheader{background:linear-gradient(#333,#222);position:sticky;top:0;z-index:800}"
+    ".luciheader-in{display:flex;align-items:stretch;max-width:860px;margin:0 auto;"
+    "padding:0 14px;flex-wrap:wrap}"
+    ".brand{color:#fff;font-size:17px;font-weight:600;padding:11px 14px 11px 0;"
+    "letter-spacing:-.2px;display:flex;align-items:center;gap:8px}"
+    ".brand svg{width:34px;height:34px;margin:0}"
+    ".luciheader nav{display:flex;align-self:stretch;flex:1}"
+    ".tabs input{position:absolute;opacity:0;pointer-events:none}"
+    ".luciheader nav label{color:#bfbfbf;padding:0 14px;font-size:13.5px;cursor:pointer;"
+    "display:flex;align-items:center;white-space:nowrap;border-radius:12px 12px 0 0;"
+    "margin-top:11px;position:relative}"
+    "#t1:checked~.luciheader nav label[for=t1],#t2:checked~.luciheader nav label[for=t2],"
+    "#t3:checked~.luciheader nav label[for=t3],#t4:checked~.luciheader nav label[for=t4],"
+    "#t5:checked~.luciheader nav label[for=t5]{background:var(--bg);color:var(--fg);font-weight:600}"
+    "#t1:checked~.luciheader nav label[for=t1]::before,#t1:checked~.luciheader nav label[for=t1]::after,"
+    "#t2:checked~.luciheader nav label[for=t2]::before,#t2:checked~.luciheader nav label[for=t2]::after,"
+    "#t3:checked~.luciheader nav label[for=t3]::before,#t3:checked~.luciheader nav label[for=t3]::after,"
+    "#t4:checked~.luciheader nav label[for=t4]::before,#t4:checked~.luciheader nav label[for=t4]::after,"
+    "#t5:checked~.luciheader nav label[for=t5]::before,#t5:checked~.luciheader nav label[for=t5]::after"
+    "{content:'';position:absolute;bottom:0;width:12px;height:12px}"
+    ".luciheader nav label[for=t1]::before,.luciheader nav label[for=t2]::before,"
+    ".luciheader nav label[for=t3]::before,.luciheader nav label[for=t4]::before,"
+    ".luciheader nav label[for=t5]::before{left:-12px;"
+    "background:radial-gradient(circle at top left,transparent 12px,var(--bg) 12px)}"
+    ".luciheader nav label[for=t1]::after,.luciheader nav label[for=t2]::after,"
+    ".luciheader nav label[for=t3]::after,.luciheader nav label[for=t4]::after,"
+    ".luciheader nav label[for=t5]::after{right:-12px;"
+    "background:radial-gradient(circle at top right,transparent 12px,var(--bg) 12px)}"
+    /* Narrow enough that brand + tabs + switch cannot share one line: the
+       switch used to be whichever item happened to wrap, landing under the
+       tabs. Give the tabs their own full-width row instead, so brand and
+       switch always keep the first one. */
+    // overflow-x:auto turns this row into its own scrollport, and Genel's
+    // ::before/Ayarlar's ::after both draw 12px to the OUTSIDE of the first
+    // and last tab - past where that scrollport starts and ends. Without
+    // this padding the scrollport clips them: Genel's curved left corner
+    // came out square, which is what the padding buys back.
+    "@media(max-width:640px){.luciheader nav{order:3;flex:0 0 100%;"
+    "overflow-x:auto;margin-top:2px;padding:0 12px}}"
+    // margin-left:auto, not just nav's own flex:1, pushes this to the far
+    // right: on mobile nav drops its flex:1 to wrap onto its own row, which
+    // would otherwise leave the switch sitting right next to the brand.
+    ".indicators{display:flex;align-items:center;gap:12px;padding:7px 0;margin-left:auto}"
+    // The language switch is a real page reload (every string on the page is
+    // server-rendered), not a client-side toggle like the theme switch next
+    // to it - styled as a small pill so the two don't compete for attention.
+    ".langf{margin:0;display:inline}"
+    ".langbtn{width:auto;margin:0;padding:5px 11px;font-size:12px;font-weight:600;"
+    "border:1px solid var(--line);border-radius:999px;background:var(--card);"
+    "color:var(--dim)}"
+    // Inside the header bar (Genel/Ağ/... tab strip) the button sits on the
+    // fixed dark gradient every theme shares, not on var(--bg) - the same
+    // reason the theme switch and nav labels around it use their own fixed
+    // colors instead of the page's theme variables.
+    ".luciheader .langbtn{color:#fff;border-color:rgba(255,255,255,.35);"
+    "background:rgba(255,255,255,.14)}"
+    ".theme-switch{position:relative;width:42px;height:23px;display:inline-block;"
+    "cursor:pointer;border-radius:999px}"
+    ".theme-switch input{position:absolute;opacity:0;width:0;height:0}"
+    ".ts-track{position:absolute;inset:0;background:rgba(255,255,255,.28);"
+    "border-radius:999px;transition:background .2s}"
+    ".ts-knob{position:absolute;left:3px;top:3px;width:17px;height:17px;border-radius:50%;"
+    "background:#fff;display:flex;align-items:center;justify-content:center;"
+    "transition:transform .25s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 3px rgba(0,0,0,.4)}"
+    ".ts-knob svg{position:absolute;width:11px;height:11px;transition:opacity .15s,transform .2s}"
+    ".ts-sun{color:#e8a33d;opacity:1;transform:scale(1) rotate(0)}"
+    ".ts-moon{color:#5b6b7a;opacity:0;transform:scale(.4) rotate(40deg)}"
+    /* checked means dark: the knob slides right and shows the moon, since
+       that is the theme now in effect, not the one a tap away. */
+    "#theme-toggle:checked~.ts-track{background:#2a8fd8}"
+    "#theme-toggle:checked~.ts-track .ts-knob{transform:translateX(19px)}"
+    "#theme-toggle:checked~.ts-track .ts-knob .ts-moon{opacity:1;transform:scale(1) rotate(0)}"
+    "#theme-toggle:checked~.ts-track .ts-knob .ts-sun{opacity:0;transform:scale(.4) rotate(-40deg)}"
     /* the headline strip */
     ".hero{background:var(--card);border:1px solid var(--line);border-radius:14px;"
-    "padding:16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
+    "padding:16px;margin:18px 0 14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
     ".dot{width:11px;height:11px;border-radius:50%;flex:0 0 11px}"
     ".dot.ok{background:var(--green);box-shadow:0 0 0 4px rgba(34,197,94,.16)}"
     ".dot.warn{background:var(--amber);box-shadow:0 0 0 4px rgba(245,158,11,.16)}"
@@ -150,33 +333,64 @@ static const char CSS[] =
     ".hero .st{font-weight:600}"
     ".hero .addr{margin-left:auto;font-family:ui-monospace,Menlo,monospace;"
     "font-size:14px;color:var(--dim)}"
-    /* tabs, done with radios so switching needs no script */
-    ".tabs input{position:absolute;opacity:0;pointer-events:none}"
-    ".tabbar{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);"
-    "border-radius:11px;padding:4px;margin-bottom:14px;overflow-x:auto}"
-    ".tabbar label{flex:1;text-align:center;padding:8px 12px;border-radius:8px;"
-    "font-size:14px;color:var(--dim);white-space:nowrap;cursor:pointer}"
     ".panel{display:none}"
-    "#t1:checked~.tabbar label[for=t1],#t2:checked~.tabbar label[for=t2],"
-    "#t3:checked~.tabbar label[for=t3],#t4:checked~.tabbar label[for=t4],"
-    "#t5:checked~.tabbar label[for=t5]{background:var(--blue);color:#fff}"
-    "#t1:checked~.panels .p1,#t2:checked~.panels .p2,"
-    "#t3:checked~.panels .p3,#t4:checked~.panels .p4,"
-    "#t5:checked~.panels .p5{display:block}"
-    /* cards */
-    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
-    "@media(min-width:620px){.grid{grid-template-columns:1fr 1fr 1fr}}"
-    ".cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}"
-    ".cell .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.7px}"
-    ".cell .v{font-size:17px;margin-top:4px;font-variant-numeric:tabular-nums;"
-    "font-family:ui-monospace,Menlo,monospace;word-break:break-all}"
-    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;white-space:nowrap}"
+    "#t1:checked~.wrap .panels .p1,#t2:checked~.wrap .panels .p2,"
+    "#t3:checked~.wrap .panels .p3,#t4:checked~.wrap .panels .p4,"
+    "#t5:checked~.wrap .panels .p5{display:block}"
+    /* Genel: one card per topic, icon and title on top - an overview, not a
+       diagnostic. The detail tabs below use .grid/.cell instead. */
+    ".cardgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}"
+    "@media(max-width:640px){.cardgrid{grid-template-columns:1fr}}"
+    ".card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}"
+    ".card .ic{display:block;margin:0 auto 10px}"
+    ".card h2{margin:0 0 12px;font-size:16px;font-weight:700;text-align:center;"
+    "text-transform:none;letter-spacing:-.2px;color:var(--fg)}"
+    ".card h2 .count{color:var(--dim);font-weight:400;font-size:13px}"
+    ".card hr{border:0;border-top:1px solid var(--line);margin:0}"
+    /* Every peer goes in now, not just the first four - once that outgrows a
+       comfortable card height it scrolls in place instead of pushing the
+       whole cardgrid row out of line with its neighbours. */
+    ".scrollList{max-height:230px;overflow-y:auto}"
+    ".rowline{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:8px 0;"
+    "font-size:14px;border-bottom:1px solid var(--line)}"
+    ".rowline:last-child{border-bottom:0}"
+    ".rowline .bar{flex:0 0 100%}"
+    ".rowline .k{color:var(--dim)}"
+    ".rowline .v{margin-left:auto;text-align:right;font-weight:600;"
+    "font-family:ui-monospace,Menlo,monospace;font-size:14px}"
+    ".pill{font-size:11px;font-weight:700;color:#fff;padding:3px 9px;border-radius:9px;"
+    "white-space:nowrap}"
+    ".pill.ok{background:var(--green)}.pill.warn{background:var(--amber)}"
+    ".pill.bad{background:var(--red)}"
+    /* Ağ/Sistem/Ayarlar: one bordered card of stacked rows rather than a grid
+       of little boxes - the same .cell markup the C side already emits, so
+       this is a pure reskin with no change to how a panel is built. */
+    ".grid{background:var(--card);border:1px solid var(--line);border-radius:14px;"
+    "padding:2px 14px;margin-bottom:4px}"
+    ".cell{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;padding:10px 0;"
+    "border-bottom:1px solid var(--line)}"
+    ".cell:last-child{border-bottom:0}"
+    /* A cell with a meter bar has a third child after .k/.v - force it onto
+       its own full-width line instead of squeezing into the label/value row. */
+    ".cell .bar{flex:0 0 100%}"
+    ".cell .k{color:var(--dim);font-size:13.5px}"
+    ".cell .v{margin-left:auto;text-align:right;font-size:14px;"
+    "font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;"
+    "word-break:break-all;font-weight:600}"
+    ".cell .v small{font-size:12px;color:var(--dim);font-family:inherit;"
+    "font-weight:400;white-space:nowrap}"
+    /* A wide cell's value is a long comma-separated list, not a short number -
+       give it its own full-width, left-aligned line under the label. */
+    ".cell.wide .v{flex:0 0 100%;margin-left:0;text-align:left}"
+    ".miniList{flex:0 0 100%;margin:4px 0 0;padding:0;list-style:none}"
+    ".miniList li{padding:6px 0;font-family:ui-monospace,Menlo,monospace;"
+    "font-size:13px;border-top:1px solid var(--line)}"
+    ".miniList li:first-child{border-top:0;padding-top:2px}"
     ".cell .v.row{display:flex;align-items:center;gap:6px}"
     /* A hostname broken across lines mid-word reads as a mistake; keep it on
        one line and let it trail off, since the copy button has the whole
        value anyway. */
     ".cell .v.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-    ".cell.wide{grid-column:1/-1}"
     ".cp{flex:0 0 auto;background:none;border:0;color:var(--dim);cursor:pointer;"
     "padding:3px;width:auto;margin:0;border-radius:6px;display:inline-flex;"
     "align-items:center}"
@@ -186,7 +400,7 @@ static const char CSS[] =
     ".cp.sm:hover{opacity:1;background:none}"
     ".cp.sm svg{width:13px;height:13px}"
     "h2{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;"
-    "margin:18px 0 8px}"
+    "margin:22px 0 8px}"
     "h2:first-child{margin-top:0}"
     ".hint{color:var(--dim);font-size:12.5px;margin:-4px 0 10px;line-height:1.45}"
     /* meters */
@@ -276,10 +490,12 @@ static esp_err_t get_log(httpd_req_t *req) {
 
 static esp_err_t get_setup(httpd_req_t *req) {
     mark_active();
+    resolve_lang(req);
     uint16_t n = 0;
     wifi_ap_record_t *aps = NULL;
-    char *page = malloc(8192);
+    char *page = malloc(16384);
     size_t o = 0;
+    char esc0[64];
 
     if (!page) return httpd_resp_send_500(req);
 
@@ -300,43 +516,61 @@ static esp_err_t get_setup(httpd_req_t *req) {
         else n = 0;
     }
 
-    o += snprintf(page + o, 8192 - o,
-        "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp kurulum</title>%s"
-        "<div class=wrap><h1>%s tsesp</h1>"
-        "<p class=sub>Cihazi ev agina bagla</p>"
-        "<form method=POST action=/save>"
-        "<label>Ağ</label><select name=ssid>"
-        "<option value=''>-- listeden seç --</option>", CSS, LOGO);
+    {
+        char langbtn[LANG_TOGGLE_MAX];
+        lang_toggle(langbtn, sizeof(langbtn), "/setup");
+        o += snprintf(page + o, room(16384, o),
+            "<!doctype html><html lang=%s><meta charset=utf-8><title>tsesp %s</title>%s"
+            "<div class=wrap><div class=top><h1>%s tsesp</h1>%s</div>"
+            "<p class=sub>%s</p>"
+            "<form method=POST action=/save>"
+            "<label>%s</label><select name=ssid>"
+            "<option value=''>%s</option>", s_lang_en ? "en" : "tr",
+            T("kurulum", "setup"), CSS, LOGO, langbtn,
+            T("Cihazi ev agina bagla", "Connect the device to your home network"),
+            T("Ağ", "Network"), T("-- listeden seç --", "-- pick from the list --"));
+    }
 
     for (uint16_t i = 0; i < n; i++) {
         char esc[80];
         html_escape(esc, sizeof(esc), (const char *)aps[i].ssid);
         if (esc[0])
-            o += snprintf(page + o, 8192 - o, "<option value=\"%s\">%s (%d dBm)</option>",
+            o += snprintf(page + o, room(16384, o), "<option value=\"%s\">%s (%d dBm)</option>",
                           esc, esc, aps[i].rssi);
     }
     free(aps);
 
-    o += snprintf(page + o, 8192 - o,
+    o += snprintf(page + o, room(16384, o),
         "</select>"
         // A scan can come back empty, and hidden networks never show up at
         // all, so typing the name has to stay possible.
-        "<label>veya ağ adını yaz</label>"
-        "<input name=ssid_manual autocomplete=off placeholder='ağ adı'>"
-        "<label>Parola</label><input type=password name=pass autocomplete=off>"
-        "<button type=submit>Bağlan</button></form>"
-        "<p class=sub style='margin-top:24px'>Bulunan ağ: %u. "
-        "Parola sadece bu cihazın flash'ına yazılır.</p>"
-        "<p class=sub><a href='/setup'>listeyi yenile</a></p></div>", (unsigned)n);
+        "<label>%s</label>"
+        "<input name=ssid_manual autocomplete=off placeholder='%s'>"
+        "<label>%s</label><input type=password name=pass autocomplete=off>"
+        "<button type=submit>%s</button></form>"
+        "<p class=sub style='margin-top:24px'>%s"
+        "%s</p>"
+        "<p class=sub><a href='/setup'>%s</a></p></div>",
+        T("veya ağ adını yaz", "or type the network name"),
+        T("ağ adı", "network name"),
+        T("Parola", "Password"),
+        T("Bağlan", "Connect"),
+        // Same nested-%s problem as the memory hint above: T() only picks
+        // the string, it doesn't touch %u, so the count is folded in first.
+        (snprintf(esc0, sizeof(esc0), T("Bulunan ağ: %u.", "Networks found: %u."), (unsigned)n), esc0),
+        T(" Parola sadece bu cihazın flash'ına yazılır.",
+          " The password is written only to this device's flash."),
+        T("listeyi yenile", "refresh the list"));
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(16384, o));
     free(page);
     return ESP_OK;
 }
 
 static esp_err_t post_save(httpd_req_t *req) {
     mark_active();
+    resolve_lang(req);
     char body[256], ssid[WIFI_SSID_MAX], pass[WIFI_PASS_MAX];
     int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len
                                                        : (int)sizeof(body) - 1;
@@ -347,11 +581,14 @@ static esp_err_t post_save(httpd_req_t *req) {
     // The typed name wins when it is filled in; otherwise take the dropdown.
     if (!form_field(body, "ssid_manual", ssid, sizeof(ssid)) || !ssid[0]) {
         if (!form_field(body, "ssid", ssid, sizeof(ssid)) || !ssid[0]) {
+            char errpage[320];
             httpd_resp_set_type(req, "text/html; charset=utf-8");
-            httpd_resp_sendstr(req,
+            snprintf(errpage, sizeof(errpage),
                 "<!doctype html><body style='font:16px system-ui;background:#111;"
-                "color:#eee;padding:24px'>Ağ seçilmedi. "
-                "<a style='color:#6ea8ff' href='/setup'>geri dön</a>");
+                "color:#eee;padding:24px'>%s "
+                "<a style='color:#6ea8ff' href='/setup'>%s</a>",
+                T("Ağ seçilmedi.", "No network selected."), T("geri dön", "go back"));
+            httpd_resp_sendstr(req, errpage);
             return ESP_OK;
         }
     }
@@ -360,14 +597,21 @@ static esp_err_t post_save(httpd_req_t *req) {
     if (device_wifi_set(ssid, pass) != ESP_OK) return httpd_resp_send_500(req);
     ESP_LOGI(TAG, "credentials stored for %s", ssid);
 
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_sendstr(req,
-        "<!doctype html><title>tamam</title>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<body style='font:16px system-ui;background:#111;color:#eee;padding:24px'>"
-        "<h1 style='font-size:20px'>Kaydedildi</h1>"
-        "<p>Cihaz yeniden başlıyor ve ağına bağlanacak. "
-        "Bu kurulum ağı birazdan kapanacak.</p>");
+    {
+        char okpage[400];
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        snprintf(okpage, sizeof(okpage),
+            "<!doctype html><title>%s</title>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<body style='font:16px system-ui;background:#111;color:#eee;padding:24px'>"
+            "<h1 style='font-size:20px'>%s</h1>"
+            "<p>%s</p>",
+            T("tamam", "done"), T("Kaydedildi", "Saved"),
+            T("Cihaz yeniden başlıyor ve ağına bağlanacak. Bu kurulum ağı birazdan kapanacak.",
+              "The device is restarting and will join that network. This setup network "
+              "will close shortly."));
+        httpd_resp_sendstr(req, okpage);
+    }
 
     // Give the browser a moment to render before the radio goes away.
     vTaskDelay(pdMS_TO_TICKS(1200));
@@ -379,10 +623,10 @@ static esp_err_t post_save(httpd_req_t *req) {
 
 static const char *uptime_str(char *out, size_t cap) {
     uint32_t sec = (uint32_t)(esp_timer_get_time() / 1000000);
-    if (sec < 90) snprintf(out, cap, "%u sn", (unsigned)sec);
-    else if (sec < 5400) snprintf(out, cap, "%u dk", (unsigned)(sec / 60));
-    else snprintf(out, cap, "%u sa %u dk", (unsigned)(sec / 3600),
-                  (unsigned)((sec % 3600) / 60));
+    if (sec < 90) snprintf(out, cap, "%u %s", (unsigned)sec, T("sn", "s"));
+    else if (sec < 5400) snprintf(out, cap, "%u %s", (unsigned)(sec / 60), T("dk", "m"));
+    else snprintf(out, cap, "%u %s %u %s", (unsigned)(sec / 3600), T("sa", "h"),
+                  (unsigned)((sec % 3600) / 60), T("dk", "m"));
     return out;
 }
 
@@ -451,27 +695,27 @@ static int signal_bars(int rssi) {
 
 static const char *signal_word(int bars) {
     switch (bars) {
-    case 5: return "mükemmel";
-    case 4: return "iyi";
-    case 3: return "orta";
-    case 2: return "zayıf";
-    case 1: return "çok zayıf";
+    case 5: return T("mükemmel", "excellent");
+    case 4: return T("iyi", "good");
+    case 3: return T("orta", "fair");
+    case 2: return T("zayıf", "weak");
+    case 1: return T("çok zayıf", "very weak");
     default: return "-";
     }
 }
 
 static const char *reset_reason_name(void) {
     switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  return "Güç verildi";
-    case ESP_RST_SW:       return "Yazılım";
-    case ESP_RST_PANIC:    return "Çökme";
-    case ESP_RST_INT_WDT:  return "Kesme zaman aşımı";
-    case ESP_RST_TASK_WDT: return "Görev zaman aşımı";
-    case ESP_RST_WDT:      return "watchdog";
-    case ESP_RST_BROWNOUT: return "Düşük voltaj";
-    case ESP_RST_DEEPSLEEP:return "Derin uyku";
-    case ESP_RST_EXT:      return "Harici reset";
-    default:               return "öğrenilemedi";
+    case ESP_RST_POWERON:  return T("Güç verildi", "Power-on");
+    case ESP_RST_SW:       return T("Yazılım", "Software");
+    case ESP_RST_PANIC:    return T("Çökme", "Crash");
+    case ESP_RST_INT_WDT:  return T("Kesme zaman aşımı", "Interrupt watchdog");
+    case ESP_RST_TASK_WDT: return T("Görev zaman aşımı", "Task watchdog");
+    case ESP_RST_WDT:      return T("watchdog", "watchdog");
+    case ESP_RST_BROWNOUT: return T("Düşük voltaj", "Brownout");
+    case ESP_RST_DEEPSLEEP:return T("Derin uyku", "Deep sleep");
+    case ESP_RST_EXT:      return T("Harici reset", "External reset");
+    default:               return T("öğrenilemedi", "unknown");
     }
 }
 
@@ -479,16 +723,16 @@ static const char *reset_reason_name(void) {
 // should see.
 static const char *state_text(const char *s) {
     if (!s) return "—";
-    if (!strcmp(s, "running"))          return "Çalışıyor";
-    if (!strcmp(s, "connecting"))       return "Bağlanıyor";
-    if (!strcmp(s, "registering"))      return "Kaydoluyor";
-    if (!strcmp(s, "awaiting-login"))   return "Giriş onayı bekleniyor";
-    if (!strcmp(s, "waiting for login"))return "Giriş onayı bekleniyor";
-    if (!strcmp(s, "fetching netmap"))  return "Ağ haritası alınıyor";
-    if (!strcmp(s, "backoff"))          return "Yeniden denenecek";
-    if (!strcmp(s, "start"))            return "Başlatılıyor";
-    if (!strcmp(s, "starting"))         return "Başlatılıyor";
-    if (!strcmp(s, "stopped"))          return "Durduruldu";
+    if (!strcmp(s, "running"))          return T("Çalışıyor", "Running");
+    if (!strcmp(s, "connecting"))       return T("Bağlanıyor", "Connecting");
+    if (!strcmp(s, "registering"))      return T("Kaydoluyor", "Registering");
+    if (!strcmp(s, "awaiting-login"))   return T("Giriş onayı bekleniyor", "Waiting for login approval");
+    if (!strcmp(s, "waiting for login"))return T("Giriş onayı bekleniyor", "Waiting for login approval");
+    if (!strcmp(s, "fetching netmap"))  return T("Ağ haritası alınıyor", "Fetching the netmap");
+    if (!strcmp(s, "backoff"))          return T("Yeniden denenecek", "Will retry");
+    if (!strcmp(s, "start"))            return T("Başlatılıyor", "Starting");
+    if (!strcmp(s, "starting"))         return T("Başlatılıyor", "Starting");
+    if (!strcmp(s, "stopped"))          return T("Durduruldu", "Stopped");
     return s;
 }
 
@@ -524,6 +768,40 @@ static void meter(char *out, size_t cap, int pct) {
     "stroke-linecap=round stroke-linejoin=round width=15 height=15>" \
     "<path d='M4 12.5l5 5L20 6.5'/></svg>"
 
+// The four Genel-tab card icons and the header's day/night toggle. All
+// static markup, no data in them, so they cost an argument slot nowhere.
+#define ICON_GLOBE \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#3fae52 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<circle cx=12 cy=12 r=10 /><path d='M2 12h20'/>" \
+    "<path d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 " \
+    "15.3 15.3 0 0 1 4-10z'/></svg>"
+#define ICON_WIFI2 \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#2a8fd8 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<path d='M5 13a10 10 0 0 1 14 0'/><path d='M8.5 16.5a5 5 0 0 1 7 0'/>" \
+    "<path d='M2 8.82a15 15 0 0 1 20 0'/><line x1=12 y1=20 x2=12.01 y2=20 /></svg>"
+#define ICON_SYS \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#f0ad4e " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<rect x=2 y=2 width=20 height=8 rx=2 /><rect x=2 y=14 width=20 height=8 rx=2 />" \
+    "<line x1=6 y1=6 x2=6.01 y2=6 /><line x1=6 y1=18 x2=6.01 y2=18 /></svg>"
+#define ICON_DEVS \
+    "<svg class=ic width=36 height=36 viewBox='0 0 24 24' fill=none stroke=#14b8a6 " \
+    "stroke-width=1.6 stroke-linecap=round stroke-linejoin=round>" \
+    "<path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx=9 cy=7 r=4 />" \
+    "<path d='M22 21v-2a4 4 0 0 0-3-3.87'/><path d='M16 3.13a4 4 0 0 1 0 7.75'/></svg>"
+// Checked means dark. The sun sits still until then, so the icon that shows
+// always names the theme you are looking at rather than the one a click away.
+#define ICON_SUN \
+    "<svg class=ts-sun viewBox='0 0 24 24' fill=none stroke=currentColor " \
+    "stroke-width=2.2 stroke-linecap=round><circle cx=12 cy=12 r=4 />" \
+    "<path d='M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2" \
+    "M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'/></svg>"
+#define ICON_MOON \
+    "<svg class=ts-moon viewBox='0 0 24 24' fill=currentColor>" \
+    "<path d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/></svg>"
+
 // Enough for the wrapper, a label, an escaped value and the icon. Getting
 // this wrong is not a cosmetic problem: a cell cut off mid-tag leaves the
 // document's divs unbalanced, which nests everything that follows inside it
@@ -539,9 +817,10 @@ static void copy_cell_ex(char *out, size_t cap, const char *label,
     n = snprintf(out, cap,
                  "<div class='cell %s'><div class=k>%s</div>"
                  "<div class='v row'><span>%s</span>"
-                 "<button class=cp onclick=\"cp(this,'%s')\" title='Kopyala'>"
+                 "<button class=cp onclick=\"cp(this,'%s')\" title='%s'>"
                  ICON_COPY "</button>"
-                 "</div></div>", wide ? "wide" : "", label, esc, esc);
+                 "</div></div>", wide ? "wide" : "", label, esc, esc,
+                 T("Kopyala", "Copy"));
     if (n < 0 || (size_t)n >= cap) {
         // Never emit half a tag. A cell without its button still renders.
         snprintf(out, cap, "<div class=cell><div class=k>%s</div>"
@@ -558,8 +837,8 @@ static void sig_html(char *out, size_t cap, int bars) {
     int i;
     size_t o = (size_t)snprintf(out, cap, "<span class='sig %s'>", cls);
     for (i = 1; i <= 5; i++)
-        o += (size_t)snprintf(out + o, cap - o, "<b class='%s'></b>", i <= bars ? "on" : "");
-    snprintf(out + o, cap - o, "</span>");
+        o += (size_t)snprintf(out + o, room(cap, o), "<b class='%s'></b>", i <= bars ? "on" : "");
+    snprintf(out + o, room(cap, o), "</span>");
 }
 
 // "100.115.225.84/32" is how the netmap states it; nobody wants to copy the
@@ -573,19 +852,42 @@ static const char *bare_addr(const char *addr, char *buf, size_t cap) {
     return buf;
 }
 
+// The same classification the peer list and the Genel-tab preview both need:
+// a direct path beats a relay, a relay beats a disco probe still in flight.
+static void peer_tag(char *tag, size_t cap, peer_entry *e) {
+    const ts_path *best = magic_best_for(e);
+    if (best)
+        snprintf(tag, cap, "<span class='tag direct'>%s %u ms</span>",
+                 T("doğrudan", "direct"), best->latency_ms);
+    else if (e->has_node_key && derp_task_connected())
+        snprintf(tag, cap, "<span class='tag relay'>%s</span>", T("dolaylı", "relayed"));
+    else if (e->has_disco && e->nendpoints)
+        snprintf(tag, cap, "<span class='tag probing'>%s</span>", T("bağlanıyor", "connecting"));
+    else
+        snprintf(tag, cap, "<span class='tag none'>%s</span>", T("bağlantı yok", "no connection"));
+}
+
 static esp_err_t get_status(httpd_req_t *req) {
     // The panels are rendered in order and the settings one is last, so when
     // this runs out it is the update form that disappears - the one control
-    // somebody may be reaching for from a long way away. Hence the headroom.
-    char *page = malloc(28672);
-    size_t cap = 28672, o = 0;
+    // somebody may be reaching for from a long way away. Hence the headroom -
+    // bumped twice already: once when a heavier CSS and a real device's own
+    // field lengths (a long SSID, an internet address with a port) pushed a
+    // live page past the old 28672, and again when the speed-test card's
+    // markup and script pushed it past 32768 far enough to cut the script off
+    // mid-function - o (see below) had grown past cap by then, so the send
+    // at the bottom was reading past the allocation's end, not just losing a
+    // tab cleanly the way room() intends.
+    char *page = malloc(40960);
+    size_t cap = 40960, o = 0;
     char ip[16], up[24], esc[520], pub[64], wifi_ssid[36];
     char sig[240], m1[96], m2[96], m3[96];
-    // Static, not on the stack: five of these is nearly 4 KB, and the HTTP
-    // server's task does not have that to spare. The server handles one
-    // request at a time, so sharing them is safe.
-    static char c1[COPY_CELL_MAX], c2[COPY_CELL_MAX], c3[COPY_CELL_MAX];
-    static char c4[COPY_CELL_MAX], c5[COPY_CELL_MAX];
+    // Static, not on the stack: three of these plus the device row list is
+    // nearly 4 KB, and the HTTP server's task does not have that to spare.
+    // The server handles one request at a time, so sharing them is safe.
+    static char c2[COPY_CELL_MAX], c3[COPY_CELL_MAX], c4[COPY_CELL_MAX];
+    static char devrows[2400];
+    char langbtn[LANG_TOGGLE_MAX];
     char bare[48];
     const char *dot = "warn";
     int rssi = 0, channel = 0, bars, core0 = -1, core1 = -1;
@@ -598,13 +900,14 @@ static esp_err_t get_status(httpd_req_t *req) {
     bool tr_hooked = false;
     uint32_t wo_total = 0, wo_lan = 0, fwd_wifi = 0, fwd_ans = 0;
     uint32_t nat_o = 0, nat_i = 0, nat_miss = 0, cb_in = 0, cb_out = 0, in_calls = 0; int nat_n = 0;
-    char arp[240];
+    char arp[320];
     esp_chip_info_t chip;
     uint32_t flash = 0;
     const esp_partition_t *app = esp_ota_get_running_partition();
     const esp_app_desc_t *desc = esp_app_get_description();
     size_t heap_free, heap_min, heap_big, heap_total;
 
+    resolve_lang(req);
     if (!page) return httpd_resp_send_500(req);
 
     net_get_ip(ip, sizeof(ip));
@@ -631,18 +934,17 @@ static esp_err_t get_status(httpd_req_t *req) {
     // no amount of routing code will help.
     {
         size_t i;
-        int n = 0;
-        arp[0] = '\0';
+        int n = 0, found = 0;
         for (i = 0; i < ARP_TABLE_SIZE; i++) {
             ip4_addr_t *ipa = NULL;
             struct netif *nif = NULL;
             struct eth_addr *eth = NULL;
             if (!etharp_get_entry(i, &ipa, &nif, &eth) || !ipa) continue;
-            n += snprintf(arp + n, sizeof(arp) - n, "%s%s", n ? ", " : "",
-                          ip4addr_ntoa(ipa));
-            if ((size_t)n >= sizeof(arp) - 20) break;
+            n += snprintf(arp + n, sizeof(arp) - n, "<li>%s</li>", ip4addr_ntoa(ipa));
+            found++;
+            if ((size_t)n >= sizeof(arp) - 30) break;
         }
-        if (!arp[0]) snprintf(arp, sizeof(arp), "hicbiri");
+        if (!found) snprintf(arp, sizeof(arp), "<li>%s</li>", T("hiçbiri", "none"));
     }
     derp_task_stats(&derp_tx, &derp_rx);
     cpu_load(&core0, &core1);
@@ -657,261 +959,430 @@ static esp_err_t get_status(httpd_req_t *req) {
 
     if (s_status.tailnet_addr && s_status.tailnet_addr[0]) dot = "ok";
     if (!net_is_connected()) dot = "bad";
+    lang_toggle(langbtn, sizeof(langbtn), "/");
 
-    o += snprintf(page + o, cap - o,
-        "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp</title>%s"
-        "<div class=wrap>"
-        "<div class=top><h1>%s<span>tsesp<small>ESP32 üzerinde tailnet düğümü</small></span></h1>"
-        "</div>"
-        "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
-        "<span class=addr>%s</span></div>",
-        CSS, LOGO, dot, state_text(s_status.state),
-        s_status.tailnet_addr && s_status.tailnet_addr[0] ? s_status.tailnet_addr : "");
-
-    if (s_status.login_url && s_status.login_url[0]) {
-        html_escape(esc, sizeof(esc), s_status.login_url);
-        o += snprintf(page + o, cap - o,
-            "<div class=banner>Bu cihazi tailnet'ine katmak icin onayla:<br>"
-            "<a href=\"%s\" target=_blank rel=noopener>%s</a></div>", esc, esc);
-    }
-
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
+        "<!doctype html><html lang=%s><meta charset=utf-8><title>tsesp</title>%s"
         "<div class=tabs>"
         "<input type=radio name=tab id=t1 checked><input type=radio name=tab id=t2>"
         "<input type=radio name=tab id=t3><input type=radio name=tab id=t4>"
         "<input type=radio name=tab id=t5>"
-        "<div class=tabbar>"
-        "<label for=t1>Genel</label><label for=t2>Ağ</label>"
-        "<label for=t3>Cihazlar</label><label for=t4>Sistem</label>"
-        "<label for=t5>Ayarlar</label></div>"
-        "<div class=panels>");
+        "<div class=luciheader><div class=luciheader-in>"
+        "<span class=brand>%stsesp</span>"
+        "<nav><label for=t1>%s</label><label for=t2>%s</label>"
+        "<label for=t3>%s</label><label for=t4>%s</label>"
+        "<label for=t5>%s</label></nav>"
+        "<div class=indicators>%s<label class=theme-switch title='%s'>"
+        "<input type=checkbox id=theme-toggle onchange=\"document.documentElement"
+        ".setAttribute('data-theme',this.checked?'dark':'light')\">"
+        "<span class=ts-track><span class=ts-knob>" ICON_SUN ICON_MOON "</span></span>"
+        "</label></div>"
+        // The switch itself has no opinion until touched - it should still
+        // show the theme the page actually opened in, which is dark unless
+        // the browser asked for light (the same rule the CSS above follows).
+        // It keeps following the device if that changes while the page is
+        // still open, but only until a tap sets data-theme explicitly -
+        // from there the switch is the reader's own choice, not the OS's.
+        "<script>(function(){"
+        "var m=matchMedia('(prefers-color-scheme:light)'),t=document.getElementById('theme-toggle');"
+        "t.checked=!m.matches;"
+        "m.addEventListener('change',function(e){"
+        "if(!document.documentElement.hasAttribute('data-theme'))t.checked=!e.matches});"
+        "})()</script>"
+        "</div></div>"
+        "<div class=wrap>"
+        "<div class=hero><span class='dot %s'></span><span class=st>%s</span>"
+        "<span class=addr>%s</span></div>",
+        s_lang_en ? "en" : "tr", CSS, LOGO,
+        T("Genel", "Overview"), T("Ağ", "Network"), T("Cihazlar", "Devices"),
+        T("Sistem", "System"), T("Ayarlar", "Settings"),
+        langbtn, T("Karanlık tema", "Dark theme"),
+        dot, state_text(s_status.state),
+        s_status.tailnet_addr && s_status.tailnet_addr[0] ? s_status.tailnet_addr : "");
 
-    /* ---- Genel ---- */
+    if (s_status.login_url && s_status.login_url[0]) {
+        html_escape(esc, sizeof(esc), s_status.login_url);
+        o += snprintf(page + o, room(cap, o),
+            "<div class=banner>%s<br>"
+            "<a href=\"%s\" target=_blank rel=noopener>%s</a></div>",
+            T("Bu cihazi tailnet'ine katmak icin onayla:", "Approve this device joining your tailnet:"),
+            esc, esc);
+    }
+
+    o += snprintf(page + o, room(cap, o), "<div class=panels>");
+
+    /* ---- Genel: kart kart özet ---- */
     n = peers_count();
-    o += snprintf(page + o, cap - o,
-        "<div class='panel p1'><div class=grid>"
-        "%s%s"
-        "<div class=cell><div class=k>Bağlı cihaz</div><div class=v>%d<small> adet</small></div></div>"
-        "<div class=cell><div class=k>Doğrudan bağlanan</div><div class=v>%d<small> cihaz</small></div></div>"
-        "<div class=cell><div class=k>Şifreli tünel</div><div class=v>%d<small> açık</small></div></div>"
-        "<div class=cell><div class=k>Çalışma süresi</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Alınan paket</div><div class=v>%u</div></div>"
-        "<div class=cell><div class=k>Gönderilen paket</div><div class=v>%u</div></div>"
+    html_escape(esc, sizeof(esc), s_status.name && s_status.name[0] ? s_status.name : "-");
+    {
+        // Every peer, not a cap - the card itself scrolls once it runs out
+        // of room, instead of this list quietly cutting names off.
+        size_t dr = 0;
+        devrows[0] = '\0';
+        if (n == 0)
+            dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
+                "<div class=rowline><span class=k>%s</span>"
+                "<span class=v>%s</span></div>",
+                T("Henüz yok", "None yet"), T("ağ haritası bekleniyor", "waiting for the netmap"));
+        for (i = 0; i < n && sizeof(devrows) - dr > 300; i++) {
+            peer_entry *e = peers_at(i);
+            char nm2[TS_NAME_STR * 2], tag2[80];
+            if (!e) continue;
+            peer_tag(tag2, sizeof(tag2), e);
+            html_escape(nm2, sizeof(nm2), e->name[0] ? e->name : T("(isimsiz)", "(unnamed)"));
+            dr += (size_t)snprintf(devrows + dr, sizeof(devrows) - dr,
+                "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>",
+                nm2, tag2);
+        }
+    }
+    // Computed again down in the Sistem tab, from the same core0/core1/heap
+    // numbers - cheap, and it means this preview never drifts from the detail
+    // tab it is a preview of.
+    meter(m1, sizeof(m1), core0);
+    meter(m2, sizeof(m2), core1);
+    meter(m3, sizeof(m3), heap_total ? (int)(100 - heap_free * 100 / heap_total) : 0);
+    o += snprintf(page + o, room(cap, o),
+        "<div class='panel p1'><div class=cardgrid>"
+        "<div class=card>" ICON_GLOBE "<h2>Tailnet</h2><hr>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%d</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%u</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%u</span></div>"
+        "</div>"
+        "<div class=card>" ICON_WIFI2 "<h2>Wi-Fi</h2><hr>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s%d<small> dBm, %s</small></span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "</div>"
+        "<div class=card>" ICON_SYS "<h2>%s</h2><hr>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%s</span></div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%d<small> %%</small></span>%s</div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%d<small> %%</small></span>%s</div>"
+        "<div class=rowline><span class=k>%s</span><span class=v>%u/%u<small> KB</small></span>%s</div>"
+        "</div>"
+        "<div class=card>" ICON_DEVS "<h2>%s <span class=count>%d</span></h2><hr>"
+        "<div class=scrollList>%s</div></div>"
         "</div></div>",
-        (copy_cell_ex(c5, sizeof(c5), "Cihaz adı",
-                      s_status.name && s_status.name[0] ? s_status.name : "-", 1), c5),
-        (copy_cell(c1, sizeof(c1), "Tailscale adresi",
-                   bare_addr(s_status.tailnet_addr, bare, sizeof(bare))), c1),
-        n, s_status.paths_up, magic_tunnels_up(),
-        uptime_str(up, sizeof(up)), (unsigned)tun_in, (unsigned)tun_out);
+        T("Cihaz adı", "Device name"), esc,
+        T("Tailscale adresi", "Tailscale address"), bare_addr(s_status.tailnet_addr, bare, sizeof(bare)),
+        T("Bağlı cihaz", "Connected devices"), n,
+        T("Çalışma süresi", "Uptime"), uptime_str(up, sizeof(up)),
+        T("Alınan paket", "Packets received"), (unsigned)tun_in,
+        T("Gönderilen paket", "Packets sent"), (unsigned)tun_out,
+        T("Bağlı olduğu ağ", "Connected to"), wifi_ssid[0] ? wifi_ssid : "-",
+        T("Sinyal", "Signal"), sig, rssi, signal_word(bars),
+        T("Ev ağındaki adresi", "Home network address"), ip,
+        T("Paylaşılan ev ağı", "Shared home network"),
+        s_status.route[0] ?
+            (s_status.route_approved > 0 ? T("<span class='pill ok'>onaylı</span>", "<span class='pill ok'>approved</span>") :
+             s_status.route_approved == 0 ? T("<span class='pill warn'>onay bekliyor</span>", "<span class='pill warn'>awaiting approval</span>") :
+             T("<span class='pill warn'>bilinmiyor</span>", "<span class='pill warn'>unknown</span>"))
+            : "-",
+        T("Sistem", "System"),
+        T("Yazılım sürümü", "Firmware version"), desc ? desc->version : "?",
+        T("Çekirdek 1", "Core 1"), core0 < 0 ? 0 : core0, m1,
+        T("Çekirdek 2", "Core 2"), core1 < 0 ? 0 : core1, m2,
+        T("Bellek", "Memory"), (unsigned)((heap_total - heap_free) / 1024), (unsigned)(heap_total / 1024), m3,
+        T("Bağlı Cihazlar", "Connected Devices"), n, devrows);
 
     /* ---- Ag ---- */
-    o += snprintf(page + o, cap - o,
-        "<div class='panel p2'><h2>Wi-Fi</h2><p class=hint>Cihazın bağlandığı ev ağı. Sinyal zayıfsa bağlantı kopmasa da yavaşlar.</p><div class=grid>"
-        "<div class=cell><div class=k>Bağlı olduğu ağ</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Sinyal</div><div class=v>%s%d<small> dBm, %s</small></div></div>"
-        "<div class=cell><div class=k>Kanal</div><div class=v>%d</div></div>"
-        "<div class=cell><div class=k>Kopma sayısı</div><div class=v>%u<small>"
-        " kez yeniden bağlandı</small></div></div>"
+    o += snprintf(page + o, room(cap, o),
+        "<div class='panel p2'><h2>Wi-Fi</h2><p class=hint>%s</p><div class=grid>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s%d<small> dBm, %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small>"
+        " %s</small></div></div>"
         "</div>"
-        "<h2>Adresler</h2><p class=hint>&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.</p><div class=grid>"
+        "<h2>%s</h2><p class=hint>%s</p><div class=grid>"
         "%s%s%s</div>"
-        "<h2>Ev ağına uzaktan erişim</h2><p class=hint>Uzaktan bir ev cihazına erişemiyorsan bu bölüm hangi yarının bozuk olduğunu söyler. Gelen istek sıfır: paket buraya hiç ulaşmıyor (rota onaylanmamış, uzaktaki cihazda subnet rotaları kapalı, ya da oradaki yerel ağ bu ağla aynı numarada). Gelen var, yanıt yok: sorun ev ağındaki cihazda.</p><div class=grid>"
-        "<div class=cell><div class=k>Rota onayı</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Gelen istek</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Boyu aşıp düşen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Ağa çıkarılan</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Rotası yok</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Yığında düşen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell wide><div class=k>Ev ağında görülen cihazlar</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Wi-Fi izleyici</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Çevrilmemiş çıkan</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>LAN'dan dönen yanıt</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Wi-Fi'dan giden</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Bunun LAN'a gideni</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Hedefe ulaşan</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Hedefin cevabı</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Çeviri: giden</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Çeviri: dönen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Eşleşmeyen dönen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Açık eşleme</div><div class=v>%d</div></div>"
-        "<div class=cell><div class=k>Bozuk gelen</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Çeviri bozdu</div><div class=v>%u<small> paket</small></div></div>"
-        "<div class=cell><div class=k>Giriş kancası çalıştı</div><div class=v>%u<small> kez</small></div></div>"
+        "<h2>%s</h2><p class=hint>%s</p><div class=grid>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell wide><div class=k>%s</div>"
+        "<ul class=miniList>%s</ul></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> %s</small></div></div>"
         "</div>"
-        "<h2>Bağlantı yöntemi</h2><p class=hint>Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.</p><div class=grid>"
-        "<div class=cell><div class=k>Ara sunucu</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Bağlantı denemesi</div><div class=v>%u</div></div>"
-        "<div class=cell><div class=k>Gelen yanıt</div><div class=v>%u</div></div>"
-        "<div class=cell><div class=k>Röleden giden</div><div class=v>%u</div></div>"
-        "<div class=cell><div class=k>Röleden gelen</div><div class=v>%u</div></div>"
-        "</div></div>",
-        wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), channel,
-        (unsigned)link_reconnects,
-        (copy_cell(c2, sizeof(c2), "Ev ağındaki adresi", ip), c2),
-        (copy_cell(c3, sizeof(c3), "İnternetten görünen adres",
-                   magic_get_public(pub, sizeof(pub)) ? pub : "henüz belirlenmedi"), c3),
-        (copy_cell(c4, sizeof(c4), "Paylaşılan ev ağı",
+        "<h2>%s</h2><p class=hint>%s</p><div class=grid>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u</div></div>"
+        "</div>"
+        "<h2>%s</h2><p class=hint>%s</p>"
+        "<div class=grid id=spdbox style=display:none>"
+        "<div class=cell><div class=k>%s</div><div class=v id=spdv>-</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v id=spdt>-</div></div>"
+        "</div>"
+        "<button id=spdb onclick='spd()'>%s</button>"
+        "</div>",
+        T("Cihazın bağlandığı ev ağı. Sinyal zayıfsa bağlantı kopmasa da yavaşlar.",
+          "The home network this device joined. A weak signal slows things down even when the link doesn't drop."),
+        T("Bağlı olduğu ağ", "Connected to"), wifi_ssid[0] ? wifi_ssid : "-",
+        T("Sinyal", "Signal"), sig, rssi, signal_word(bars),
+        T("Kanal", "Channel"), channel,
+        T("Kopma sayısı", "Reconnect count"), (unsigned)link_reconnects,
+        T("kez yeniden bağlandı", "reconnects"),
+        T("Adresler", "Addresses"),
+        T("&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.",
+          "\"Shared home network\" is the LAN you can reach remotely through this device. It needs approving in the Tailscale admin console."),
+        (copy_cell(c2, sizeof(c2), T("Ev ağındaki adresi", "Home network address"), ip), c2),
+        (copy_cell(c3, sizeof(c3), T("İnternetten görünen adres", "Public address as seen from the internet"),
+                   magic_get_public(pub, sizeof(pub)) ? pub : T("henüz belirlenmedi", "not yet determined")), c3),
+        (copy_cell(c4, sizeof(c4), T("Paylaşılan ev ağı", "Shared home network"),
                    s_status.route[0] ? s_status.route : "-"), c4),
-        s_status.route_approved > 0 ? "onaylandı" :
-            s_status.route_approved == 0 ? "onay bekliyor" : "bilinmiyor",
-        (unsigned)fwd_in, (unsigned)fwd_out, (unsigned)fwd_big,
-        (unsigned)ip_fw, (unsigned)ip_rterr, (unsigned)ip_drop, arp,
-        tr_hooked ? "kurulu" : "KURULAMADI",
-        (unsigned)tr_untrans, (unsigned)tr_replies,
-        (unsigned)wo_total, (unsigned)wo_lan, (unsigned)fwd_wifi, (unsigned)fwd_ans,
-        (unsigned)nat_o, (unsigned)nat_i, (unsigned)nat_miss, nat_n,
-        (unsigned)cb_in, (unsigned)cb_out, (unsigned)in_calls,
-        derp_task_connected() ? derp_task_region_name() : "bağlı değil",
-        (unsigned)pings, (unsigned)pongs,
-        (unsigned)derp_tx, (unsigned)derp_rx);
+        T("Ev ağına uzaktan erişim", "Remote access to the home network"),
+        T("Uzaktan bir ev cihazına erişemiyorsan bu bölüm hangi yarının bozuk olduğunu söyler. "
+          "Gelen istek sıfır: paket buraya hiç ulaşmıyor (rota onaylanmamış, uzaktaki cihazda "
+          "subnet rotaları kapalı, ya da oradaki yerel ağ bu ağla aynı numarada). Gelen var, "
+          "yanıt yok: sorun ev ağındaki cihazda.",
+          "If you can't reach a home device remotely, this section says which half is broken. "
+          "Incoming requests at zero: the packet never gets here at all (the route isn't approved, "
+          "the remote device has subnet routes turned off, or its local network shares this one's "
+          "number). Incoming but no reply: the problem is on the device on the home network."),
+        T("Rota onayı", "Route approval"),
+        s_status.route_approved > 0 ? T("onaylandı", "approved") :
+            s_status.route_approved == 0 ? T("onay bekliyor", "awaiting approval") : T("bilinmiyor", "unknown"),
+        T("Gelen istek", "Incoming requests"), (unsigned)fwd_in, T("paket", "packets"),
+        T("Dönen yanıt", "Replies sent back"), (unsigned)fwd_out, T("paket", "packets"),
+        T("Boyu aşıp düşen", "Dropped (too large)"), (unsigned)fwd_big, T("paket", "packets"),
+        T("Ağa çıkarılan", "Forwarded onto the network"), (unsigned)ip_fw, T("paket", "packets"),
+        T("Rotası yok", "No route"), (unsigned)ip_rterr, T("paket", "packets"),
+        T("Yığında düşen", "Dropped in the stack"), (unsigned)ip_drop, T("paket", "packets"),
+        T("Ev ağında görülen cihazlar", "Devices seen on the home network"), arp,
+        T("Wi-Fi izleyici", "Wi-Fi sniffer"), tr_hooked ? T("kurulu", "installed") : T("KURULAMADI", "FAILED TO INSTALL"),
+        T("Çevrilmemiş çıkan", "Untranslated outgoing"), (unsigned)tr_untrans, T("paket", "packets"),
+        T("LAN'dan dönen yanıt", "Replies back from the LAN"), (unsigned)tr_replies, T("paket", "packets"),
+        T("Wi-Fi'dan giden", "Outgoing via Wi-Fi"), (unsigned)wo_total, T("paket", "packets"),
+        T("Bunun LAN'a gideni", "Of that, reaching the LAN"), (unsigned)wo_lan, T("paket", "packets"),
+        T("Hedefe ulaşan", "Reached the target"), (unsigned)fwd_wifi, T("paket", "packets"),
+        T("Hedefin cevabı", "Target's reply"), (unsigned)fwd_ans, T("paket", "packets"),
+        T("Çeviri: giden", "Translation: outgoing"), (unsigned)nat_o, T("paket", "packets"),
+        T("Çeviri: dönen", "Translation: return"), (unsigned)nat_i, T("paket", "packets"),
+        T("Eşleşmeyen dönen", "Unmatched return"), (unsigned)nat_miss, T("paket", "packets"),
+        T("Açık eşleme", "Open mappings"), nat_n,
+        T("Bozuk gelen", "Corrupt incoming"), (unsigned)cb_in, T("paket", "packets"),
+        T("Çeviri bozdu", "Translation broke it"), (unsigned)cb_out, T("paket", "packets"),
+        T("Giriş kancası çalıştı", "Input hook ran"), (unsigned)in_calls, T("kez", "times"),
+        T("Bağlantı yöntemi", "Connection method"),
+        T("Cihazlar birbirine doğrudan ulaşmayı dener. Modemler buna izin vermezse trafik ortadaki "
+          "bir Tailscale sunucusundan dolanır: daha yavaş ama her zaman çalışır.",
+          "Devices try to reach each other directly. If the modems don't allow it, traffic detours "
+          "through a Tailscale server in between: slower, but it always works."),
+        T("Doğrudan bağlanan", "Connected directly"), s_status.paths_up,
+        T("Şifreli tünel", "Encrypted tunnel"), magic_tunnels_up(),
+        T("Ara sunucu", "Relay server"), derp_task_connected() ? derp_task_region_name() : T("bağlı değil", "not connected"),
+        T("Bağlantı denemesi", "Connection attempts"), (unsigned)pings,
+        T("Gelen yanıt", "Replies received"), (unsigned)pongs,
+        T("Röleden giden", "Sent via relay"), (unsigned)derp_tx,
+        T("Röleden gelen", "Received via relay"), (unsigned)derp_rx,
+        T("Hız testi", "Speed test"),
+        T("Bu tarayıcı ile cihaz arasında ölçülen gerçek indirme hızı - Wi-Fi, tünel ve şifrelemenin "
+          "tümü dahil. README'deki &quot;1-3 Mbps beklenti&quot; buradan doğrulanır.",
+          "The real download speed measured between this browser and the device - Wi-Fi, tunnel and "
+          "encryption all included. This is what confirms (or not) the README's guessed range."),
+        T("Hız", "Speed"), T("Süre", "Duration"),
+        T("Hız testini başlat", "Start speed test"));
 
     /* ---- Peer'lar ---- */
-    o += snprintf(page + o, cap - o, "<div class='panel p3'>");
+    o += snprintf(page + o, room(cap, o), "<div class='panel p3'>");
     if (n == 0)
-        o += snprintf(page + o, cap - o,
-            "<div class=peer><div class=nm><b>Henüz yok</b>"
-            "<span>ağ haritası bekleniyor</span></div></div>");
-    for (i = 0; i < n && cap - o > 700; i++) {
+        o += snprintf(page + o, room(cap, o),
+            "<div class=peer><div class=nm><b>%s</b>"
+            "<span>%s</span></div></div>",
+            T("Henüz yok", "None yet"), T("ağ haritası bekleniyor", "waiting for the netmap"));
+    for (i = 0; i < n && room(cap, o) > 700; i++) {
         peer_entry *e = peers_at(i);
-        const ts_path *best;
         char nm[TS_NAME_STR * 2], tag[80];
         if (!e) continue;
 
-        best = magic_best_for(e);
-        if (best)
-            snprintf(tag, sizeof(tag), "<span class='tag direct'>doğrudan %u ms</span>",
-                     best->latency_ms);
-        else if (e->has_node_key && derp_task_connected())
-            snprintf(tag, sizeof(tag), "<span class='tag relay'>dolaylı</span>");
-        else if (e->has_disco && e->nendpoints)
-            snprintf(tag, sizeof(tag), "<span class='tag probing'>bağlanıyor</span>");
-        else
-            snprintf(tag, sizeof(tag), "<span class='tag none'>bağlantı yok</span>");
+        peer_tag(tag, sizeof(tag), e);
 
-        html_escape(nm, sizeof(nm), e->name[0] ? e->name : "(isimsiz)");
+        html_escape(nm, sizeof(nm), e->name[0] ? e->name : T("(isimsiz)", "(unnamed)"));
         bare_addr(e->addr, bare, sizeof(bare));
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class=peer><span class='dot %s'></span>"
             "<div class=nm>"
             "<b>%s<button class='cp sm' onclick=\"cp(this,'%s')\" "
-            "title='Adı kopyala'>" ICON_COPY "</button></b>"
+            "title='%s'>" ICON_COPY "</button></b>"
             "<span>%s<button class='cp sm' onclick=\"cp(this,'%s')\" "
-            "title='Adresi kopyala'>" ICON_COPY "</button></span>"
+            "title='%s'>" ICON_COPY "</button></span>"
             "</div>%s</div>",
             e->online ? "ok" : "none",
-            nm, nm,
-            e->addr[0] ? bare : "-", e->addr[0] ? bare : "-",
+            nm, nm, T("Adı kopyala", "Copy the name"),
+            e->addr[0] ? bare : "-", e->addr[0] ? bare : "-", T("Adresi kopyala", "Copy the address"),
             tag);
     }
-    o += snprintf(page + o, cap - o, "</div>");
+    o += snprintf(page + o, room(cap, o), "</div>");
 
     /* ---- Sistem ---- */
     meter(m1, sizeof(m1), core0);
     meter(m2, sizeof(m2), core1);
     meter(m3, sizeof(m3), heap_total ? (int)(100 - heap_free * 100 / heap_total) : 0);
 
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<div class='panel p4'>"
-        "<h2>İşlemci</h2><p class=hint>Son birkaç saniyedeki ortalama yük.</p>"
+        "<h2>%s</h2><p class=hint>%s</p>"
         "<div class=grid>"
-        "<div class=cell><div class=k>Çekirdek 1</div><div class=v>%d<small> %%</small></div>%s</div>"
-        "<div class=cell><div class=k>Çekirdek 2</div><div class=v>%d<small> %%</small></div>%s</div>"
-        "<div class=cell><div class=k>Saat hızı</div><div class=v>%d<small> MHz</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d<small> %%</small></div>%s</div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d<small> %%</small></div>%s</div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%d<small> MHz</small></div></div>"
         "</div>",
-        core0 < 0 ? 0 : core0, m1, core1 < 0 ? 0 : core1, m2,
-        CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+        T("İşlemci", "Processor"), T("Son birkaç saniyedeki ortalama yük.", "The average load over the last few seconds."),
+        T("Çekirdek 1", "Core 1"), core0 < 0 ? 0 : core0, m1,
+        T("Çekirdek 2", "Core 2"), core1 < 0 ? 0 : core1, m2,
+        T("Saat hızı", "Clock speed"), CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
 
-    o += snprintf(page + o, cap - o,
-        "<h2>Bellek</h2>"
-        "<p class=hint>Toplam %u KB. Boş bellek tükenirse cihaz yeniden başlar.</p>"
+    o += snprintf(page + o, room(cap, o),
+        "<h2>%s</h2>"
+        "<p class=hint>%s</p>"
         "<div class=grid>"
-        "<div class=cell><div class=k>Kullanılan</div><div class=v>%u<small> KB</small></div>%s</div>"
-        "<div class=cell><div class=k>Boş</div><div class=v>%u<small> KB</small></div></div>"
-        "<div class=cell><div class=k>En az boş</div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> KB</small></div>%s</div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> KB</small></div></div>"
+        "<div class=cell><div class=k>%s</div>"
         "<div class=v>%u<small> KB</small></div></div>"
         "</div>",
-        (unsigned)(heap_total / 1024),
-        (unsigned)((heap_total - heap_free) / 1024), m3,
-        (unsigned)(heap_free / 1024), (unsigned)(heap_min / 1024));
+        T("Bellek", "Memory"),
+        // A translated string chosen by T() is passed on as a %s argument
+        // above, so a %u baked into IT would never see snprintf's real
+        // argument list - it has to be resolved here, on its own, first.
+        (snprintf(m1, sizeof(m1),
+                  T("Toplam %u KB. Boş bellek tükenirse cihaz yeniden başlar.",
+                    "%u KB total. The device restarts if it runs out of free memory."),
+                  (unsigned)(heap_total / 1024)), m1),
+        T("Kullanılan", "Used"), (unsigned)((heap_total - heap_free) / 1024), m3,
+        T("Boş", "Free"), (unsigned)(heap_free / 1024),
+        T("En az boş", "Lowest free"), (unsigned)(heap_min / 1024));
 
-    o += snprintf(page + o, cap - o,
-        "<h2>Donanım</h2><div class=grid>"
-        "<div class=cell><div class=k>Kart</div><div class=v>%s<small> v%d.%d</small></div></div>"
-        "<div class=cell><div class=k>Depolama</div><div class=v>%u<small> MB</small></div></div>"
-        "<div class=cell><div class=k>Yazılıma ayrılan</div><div class=v>%u<small> KB</small></div></div>"
-        "<div class=cell><div class=k>Yazılım sürümü</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>Son açılış sebebi</div><div class=v>%s</div></div>"
+    o += snprintf(page + o, room(cap, o),
+        "<h2>%s</h2><div class=grid>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s<small> v%d.%d</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> MB</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> KB</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
         "</div>",
-        chip_name(&chip), chip.revision / 100, chip.revision % 100,
-        (unsigned)(flash / (1024 * 1024)),
-        (unsigned)(app ? app->size / 1024 : 0),
-        desc ? desc->version : "?", reset_reason_name());
+        T("Donanım", "Hardware"),
+        T("Kart", "Chip"), chip_name(&chip), chip.revision / 100, chip.revision % 100,
+        T("Depolama", "Storage"), (unsigned)(flash / (1024 * 1024)),
+        T("Yazılıma ayrılan", "Reserved for firmware"), (unsigned)(app ? app->size / 1024 : 0),
+        T("Yazılım sürümü", "Firmware version"), desc ? desc->version : "?",
+        T("Son açılış sebebi", "Last restart reason"), reset_reason_name());
 
-    o += snprintf(page + o, cap - o,
-        "<h2>Ayrıntı (teknik)</h2>"
-        "<p class=hint>Her görevin yığınında kalan boş yer, ve belleğin en büyük "
-        "tek parçası. Sıfıra yaklaşan bir değer yeniden başlamaya yol açar.</p>"
+    o += snprintf(page + o, room(cap, o),
+        "<h2>%s</h2>"
+        "<p class=hint>%s</p>"
         "<div class=grid>"
-        "<div class=cell><div class=k>En büyük tek parça</div><div class=v>%u<small> KB</small></div></div>"
-        "<div class=cell><div class=k>Ağ görevi</div><div class=v>%u<small> B</small></div></div>"
-        "<div class=cell><div class=k>Kontrol görevi</div><div class=v>%u<small> B</small></div></div>"
-        "<div class=cell><div class=k>Ara sunucu görevi</div><div class=v>%u<small> B</small></div></div>"
-        "<div class=cell><div class=k>Geliştirme kiti</div><div class=v>%s</div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> KB</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> B</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> B</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%u<small> B</small></div></div>"
+        "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
         "</div></div>",
-        (unsigned)(heap_big / 1024),
-        stack_headroom("magic"), stack_headroom("control"), stack_headroom("derp"),
-        IDF_VER);
+        T("Ayrıntı (teknik)", "Detail (technical)"),
+        T("Her görevin yığınında kalan boş yer, ve belleğin en büyük tek parçası. "
+          "Sıfıra yaklaşan bir değer yeniden başlamaya yol açar.",
+          "Each task's remaining stack headroom, and memory's single largest free block. "
+          "A value approaching zero leads to a restart."),
+        T("En büyük tek parça", "Largest single block"), (unsigned)(heap_big / 1024),
+        T("Ağ görevi", "Network task"), stack_headroom("magic"),
+        T("Kontrol görevi", "Control task"), stack_headroom("control"),
+        T("Ara sunucu görevi", "Relay task"), stack_headroom("derp"),
+        T("Geliştirme kiti", "SDK"), IDF_VER);
 
     /* ---- Ayarlar ---- */
     {
         ota_state ost = ota_running_state();
-        o += snprintf(page + o, cap - o,
+        o += snprintf(page + o, room(cap, o),
             "<div class='panel p5'>"
-            "<h2>Yazılım güncelleme</h2>"
-            "<p class=hint>Bilgisayarda derlenen <code>.bin</code> dosyasını yükle; "
-            "cihaz onu boştaki slota yazıp yeniden başlar. Yeni yazılım "
-            "<b>deneme</b> olarak açılır: tailnet'e geri bağlanıp iki dakika "
-            "ayakta kalırsa kalıcı olur, kalamazsa bir sonraki açılışta "
-            "önyükleyici eski sürüme döner. Yani bozuk bir güncelleme en fazla "
-            "bir yeniden başlamaya mal olur, yola çıkmaya değil.</p>"
+            "<h2>%s</h2>"
+            "<p class=hint>%s</p>"
             "<div class=grid>"
-            "<div class=cell><div class=k>Çalışan slot</div><div class=v>%s</div></div>"
-            "<div class=cell><div class=k>Durumu</div><div class=v>%s</div></div>"
-            "<div class=cell><div class=k>Sürüm</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
             "</div>"
             "%s"
-            "<label class=fpick for=fw id=fwl>.bin dosyasi sec</label>"
+            "<label class=fpick for=fw id=fwl>%s</label>"
             "<input type=file id=fw accept='.bin' hidden>"
-            "<button id=fwb onclick='up()'>Yükle ve yeniden başlat</button>"
+            "<button id=fwb onclick='up()'>%s</button>"
             "<p class=hint id=fws></p>",
-            ota_running_slot(),
-            ost == OTA_IMG_TRIAL ? "deneme sürümü" :
-                ost == OTA_IMG_STABLE ? "kalıcı" : "bilinmiyor",
-            desc ? desc->version : "?",
+            T("Yazılım güncelleme", "Firmware update"),
+            T("Bilgisayarda derlenen <code>.bin</code> dosyasını yükle; cihaz onu boştaki "
+              "slota yazıp yeniden başlar. Yeni yazılım <b>deneme</b> olarak açılır: "
+              "tailnet'e geri bağlanıp iki dakika ayakta kalırsa kalıcı olur, kalamazsa "
+              "bir sonraki açılışta önyükleyici eski sürüme döner. Yani bozuk bir güncelleme "
+              "en fazla bir yeniden başlamaya mal olur, yola çıkmaya değil.",
+              "Upload the <code>.bin</code> built on your computer; the device writes it to "
+              "the spare slot and restarts. The new firmware comes up <b>on trial</b>: if it "
+              "reconnects to the tailnet and stays up for two minutes it becomes permanent, "
+              "and if it can't the bootloader falls back to the old version on the next boot. "
+              "So a broken update costs at most one restart, not a trip out to fix it."),
+            T("Çalışan slot", "Running slot"), ota_running_slot(),
+            T("Durumu", "Status"),
+            ost == OTA_IMG_TRIAL ? T("deneme sürümü", "on trial") :
+                ost == OTA_IMG_STABLE ? T("kalıcı", "permanent") : T("bilinmiyor", "unknown"),
+            T("Sürüm", "Version"), desc ? desc->version : "?",
             // Otherwise a silently reverted update looks like one that never
             // went up at all.
             ota_rolled_back() ?
-                "<p class=hint><b>Not:</b> en son yüklenen yazılım kendini "
-                "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>" : "");
+                T("<p class=hint><b>Not:</b> en son yüklenen yazılım kendini "
+                  "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>",
+                  "<p class=hint><b>Note:</b> the most recently uploaded firmware could "
+                  "not confirm itself, and the bootloader fell back to this version.</p>") : "",
+            T(".bin dosyasi sec", "choose a .bin file"),
+            T("Yükle ve yeniden başlat", "Upload and restart"));
     }
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "<h2>Tailscale</h2>"
-        "<p class=hint>Cihazın tailnet kimliğini siler ve yeni bir giriş bağlantısı "
-        "üretir. Wi-Fi ayarları korunur.</p>"
+        "<p class=hint>%s</p>"
         "<form method=POST action=/rejoin>"
-        "<button type=submit>Tailscale'e yeniden kaydol</button></form>"
-        "<h2>Wi-Fi ve kimlik</h2>"
-        "<p class=hint>Her şeyi siler. Cihaz kurulum moduna döner ve kendi Wi-Fi "
-        "ağını açar; baştan kurman gerekir.</p>"
-        "<form method=POST action=/forget onsubmit=\"return confirm('Tüm ayarlar silinecek. Emin misin?')\">"
-        "<button class=danger type=submit>Her şeyi sil ve baştan kur</button></form>"
-        "</div>");
+        "<button type=submit>%s</button></form>"
+        "<h2>%s</h2>"
+        "<p class=hint>%s</p>"
+        "<form method=POST action=/forget onsubmit=\"return confirm('%s')\">"
+        "<button class=danger type=submit>%s</button></form>"
+        "</div>",
+        T("Cihazın tailnet kimliğini siler ve yeni bir giriş bağlantısı üretir. "
+          "Wi-Fi ayarları korunur.",
+          "Erases the device's tailnet identity and generates a new login link. "
+          "Wi-Fi settings are kept."),
+        T("Tailscale'e yeniden kaydol", "Rejoin Tailscale"),
+        T("Wi-Fi ve kimlik", "Wi-Fi and identity"),
+        T("Her şeyi siler. Cihaz kurulum moduna döner ve kendi Wi-Fi ağını açar; "
+          "baştan kurman gerekir.",
+          "Erases everything. The device goes back into setup mode and opens its own "
+          "Wi-Fi network again; you'll need to set it up from scratch."),
+        T("Tüm ayarlar silinecek. Emin misin?", "This erases all settings. Are you sure?"),
+        T("Her şeyi sil ve baştan kur", "Erase everything and start over"));
 
     // Refreshes the panels only. The tab radios live outside them, so the
     // section you are looking at stays put.
-    o += snprintf(page + o, cap - o,
+    o += snprintf(page + o, room(cap, o),
         "</div></div></div>"
         "<script>"
         // The refresh replaces the panels wholesale, which would throw away a
@@ -923,9 +1394,16 @@ static esp_err_t get_status(httpd_req_t *req) {
         "window.OB=1;const f=e.target.files[0],l=document.getElementById('fwl');"
         "if(f&&l){l.textContent=f.name+' - '+Math.round(f.size/1024)+' KB';"
         "l.classList.add('has')}});"
+        // Checking OB only here left a gap the width of the fetch itself: pick
+        // a file while a refresh already in flight, and it lands anyway once
+        // the awaits resolve, rebuilding <input type=file> from scratch and
+        // silently dropping the choice. Checking again after every await
+        // closes that window instead of just narrowing it.
         "setInterval(async()=>{if(window.OB)return;try{"
         "const r=await fetch('/',{cache:'no-store'});"
-        "const d=new DOMParser().parseFromString(await r.text(),'text/html');"
+        "const t=await r.text();if(window.OB)return;"
+        "const d=new DOMParser().parseFromString(t,'text/html');"
+        "if(window.OB)return;"
         "for(const s of ['.hero','.panels']){"
         "const a=document.querySelector(s),b=d.querySelector(s);"
         "if(a&&b)a.innerHTML=b.innerHTML;}"
@@ -945,21 +1423,54 @@ static esp_err_t get_status(httpd_req_t *req) {
            heap. XMLHttpRequest rather than fetch, for upload progress. */
         "function up(){const f=document.getElementById('fw').files[0];"
         "const b=document.getElementById('fwb'),s=document.getElementById('fws');"
-        "if(!f){s.textContent='önce bir .bin dosyası seç';return}"
-        "if(!confirm(f.name+' yüklenecek ve cihaz yeniden başlayacak. Devam?'))return;"
+        "if(!f){s.textContent='%s';return}"
+        "if(!confirm(f.name+' %s'))return;"
         "window.OB=1;b.disabled=true;"
         "const x=new XMLHttpRequest();x.open('POST','/ota');"
-        "x.upload.onprogress=e=>{s.textContent='yükleniyor '+"
+        "x.upload.onprogress=e=>{s.textContent='%s '+"
         "Math.round(e.loaded*100/(e.total||f.size))+'%%'};"
         "x.onload=()=>{if(x.status==200){s.textContent="
-        "'yazıldı, cihaz yeniden başlıyor - sayfayı 1-2 dakika sonra yenile'}"
-        "else{s.textContent='olmadı: '+x.responseText;b.disabled=false;window.OB=0}};"
-        "x.onerror=()=>{s.textContent='bağlantı kesildi';b.disabled=false;window.OB=0};"
+        "'%s'}"
+        "else{s.textContent='%s: '+x.responseText;b.disabled=false;window.OB=0}};"
+        "x.onerror=()=>{s.textContent='%s';b.disabled=false;window.OB=0};"
         "x.send(f)}"
-        "</script>");
+        // 1 MB is long enough to ride out one slow start and short enough that
+        // a 1 Mbps link still answers in under ten seconds. The clock starts
+        // and stops in the browser, so the number includes everything between
+        // here and the device - not just what the firmware thinks it sent.
+        "function spd(){const b=document.getElementById('spdb'),bx=document.getElementById('spdbox'),"
+        "v=document.getElementById('spdv'),t=document.getElementById('spdt');"
+        "window.OB=1;b.disabled=true;const OT=b.textContent;b.textContent='%s';"
+        "const t0=performance.now();"
+        "fetch('/api/speedtest?bytes=1048576',{cache:'no-store'}).then(x=>x.arrayBuffer())"
+        ".then(a=>{const dt=(performance.now()-t0)/1000,"
+        "mbps=(a.byteLength*8/1e6)/dt;"
+        "v.textContent=mbps.toFixed(2)+' Mbps';"
+        "t.textContent=dt.toFixed(1)+' %s, '+Math.round(a.byteLength/1024/dt)+' KB/s';"
+        "bx.style.display='block';b.textContent='%s';b.disabled=false;"
+        // The 4s auto-refresh below overwrites .panels wholesale with the
+        // server's freshly-rendered (result-less) markup - without this, the
+        // number this whole button exists to show got wiped within a second
+        // of appearing. Fifteen seconds is long enough to read it once.
+        "setTimeout(()=>{window.OB=0},15000)})"
+        ".catch(()=>{v.textContent='%s';t.textContent='%s';"
+        "bx.style.display='block';b.textContent=OT;b.disabled=false;"
+        "setTimeout(()=>{window.OB=0},15000)})}"
+        "</script>",
+        T("önce bir .bin dosyası seç", "pick a .bin file first"),
+        T("yüklenecek ve cihaz yeniden başlayacak. Devam?", "will be uploaded and the device will restart. Continue?"),
+        T("yükleniyor", "uploading"),
+        T("yazıldı, cihaz yeniden başlıyor - sayfayı 1-2 dakika sonra yenile",
+          "written, the device is restarting - reload the page in a minute or two"),
+        T("olmadı", "failed"),
+        T("bağlantı kesildi", "the connection dropped"),
+        T("Ölçülüyor...", "Measuring..."),
+        T("sn", "s"),
+        T("Tekrar ölç", "Measure again"),
+        T("olmadı", "failed"), T("bağlantı koptu", "the connection dropped"));
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(cap, o));
     free(page);
     return ESP_OK;
 }
@@ -971,37 +1482,209 @@ static esp_err_t get_settings(httpd_req_t *req) {
     char *page = malloc(14336), ip[16], pub[64];
     size_t cap = 14336, o = 0;
 
+    resolve_lang(req);
+
     if (!page) return httpd_resp_send_500(req);
     net_get_ip(ip, sizeof(ip));
-    if (!magic_get_public(pub, sizeof(pub))) snprintf(pub, sizeof(pub), "öğrenilemedi");
+    if (!magic_get_public(pub, sizeof(pub))) strncpy(pub, T("öğrenilemedi", "not yet determined"), sizeof(pub) - 1);
 
-    o += snprintf(page + o, cap - o,
-        "<!doctype html><html lang=tr><meta charset=utf-8><title>tsesp ayarlar</title>%s"
-        "<div class=wrap><div class=top><div><h1>%s Ayarlar</h1>"
-        "<p class=sub>Cihaz bilgileri ve sifirlama</p></div>"
-        "<a class=gear href=/ title=Geri>&#8592;</a></div>"
-        "<div class=grid>"
-        "<div class=cell><div class=k>Yerel IP</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>İnternetten görünen adres</div><div class=v>%s</div></div>"
-        "<div class=cell><div class=k>UDP portu</div><div class=v>%d</div></div>"
-        "<div class=cell><div class=k>Kayit</div><div class=v>%s</div></div>"
-        "</div>"
-        "<h2>Tailnet</h2>"
-        "<p class=sub>Kimligi silip yeniden kaydolur. Wi-Fi ayarlari kalir.</p>"
-        "<form method=POST action=/rejoin>"
-        "<button type=submit>Tailnet'e yeniden kaydol</button></form>"
-        "<h2>Tehlikeli</h2>"
-        "<p class=sub>Wi-Fi bilgilerini ve tailnet kimligini siler. Cihaz kurulum "
-        "moduna doner ve tailnet'e yeniden onaylanmasi gerekir.</p>"
-        "<form method=POST action=/forget onsubmit=\"return confirm('Emin misin?')\">"
-        "<button class=danger type=submit>Her seyi sil ve yeniden kur</button></form>"
-        "</div>",
-        CSS, LOGO, ip, pub, MAGIC_PORT,
-        device_is_registered() ? "kayitli" : "kayitli degil");
+    {
+        char langbtn[LANG_TOGGLE_MAX];
+        lang_toggle(langbtn, sizeof(langbtn), "/settings");
+        o += snprintf(page + o, room(cap, o),
+            "<!doctype html><html lang=%s><meta charset=utf-8><title>tsesp %s</title>%s"
+            "<div class=wrap><div class=top><div><h1>%s %s</h1>"
+            "<p class=sub>%s</p></div>"
+            "<div style='display:flex;align-items:center;gap:8px'>%s"
+            "<a class=gear href=/ title='%s'>&#8592;</a></div></div>"
+            "<div class=grid>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%d</div></div>"
+            "<div class=cell><div class=k>%s</div><div class=v>%s</div></div>"
+            "</div>"
+            "<h2>Tailnet</h2>"
+            "<p class=sub>%s</p>"
+            "<form method=POST action=/rejoin>"
+            "<button type=submit>%s</button></form>"
+            "<h2>%s</h2>"
+            "<p class=sub>%s</p>"
+            "<form method=POST action=/forget onsubmit=\"return confirm('%s')\">"
+            "<button class=danger type=submit>%s</button></form>"
+            "</div>",
+            s_lang_en ? "en" : "tr", T("ayarlar", "settings"), CSS, LOGO, T("Ayarlar", "Settings"),
+            T("Cihaz bilgileri ve sifirlama", "Device info and reset"), langbtn,
+            T("Geri", "Back"),
+            T("Yerel IP", "Local IP"), ip,
+            T("İnternetten görünen adres", "Public address as seen from the internet"), pub,
+            T("UDP portu", "UDP port"), MAGIC_PORT,
+            T("Kayit", "Registration"), device_is_registered() ? T("kayitli", "registered") : T("kayitli degil", "not registered"),
+            T("Kimligi silip yeniden kaydolur. Wi-Fi ayarlari kalir.",
+              "Erases the identity and re-registers. Wi-Fi settings are kept."),
+            T("Tailnet'e yeniden kaydol", "Rejoin the tailnet"),
+            T("Tehlikeli", "Dangerous"),
+            T("Wi-Fi bilgilerini ve tailnet kimligini siler. Cihaz kurulum moduna doner ve "
+              "tailnet'e yeniden onaylanmasi gerekir.",
+              "Erases the Wi-Fi credentials and the tailnet identity. The device goes back "
+              "into setup mode and will need approving on the tailnet again."),
+            T("Emin misin?", "Are you sure?"),
+            T("Her seyi sil ve yeniden kur", "Erase everything and set up again"));
+    }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(cap, o));
     free(page);
+    return ESP_OK;
+}
+
+// A machine-readable snapshot of the same numbers the dashboard already
+// computes, for Home Assistant or anything else that wants to poll rather
+// than parse HTML. Nothing here is gathered for a second reason - it is the
+// status page's own accessor calls, just written out as JSON.
+static esp_err_t get_api_status(httpd_req_t *req) {
+    char *page = malloc(1536);
+    size_t cap = 1536, o = 0;
+    char ip[16], wifi_ssid[36], nm[128], ssid_esc[72];
+    char route_cidr[48], derp_region[80], bare[48];
+    int rssi = 0, channel = 0, core0 = -1, core1 = -1;
+    uint32_t link_reconnects = 0, tun_in = 0, tun_out = 0;
+    esp_chip_info_t chip;
+    size_t heap_free, heap_total;
+    const esp_app_desc_t *desc = esp_app_get_description();
+    const char *reset_tok, *approved_str, *derp_connected_str;
+
+    if (!page) return httpd_resp_send_500(req);
+
+    net_get_ip(ip, sizeof(ip));
+    net_get_wifi_info(wifi_ssid, sizeof(wifi_ssid), &rssi, &channel);
+    net_get_link_stats(&link_reconnects, NULL);
+    tun_stats(&tun_in, &tun_out);
+    cpu_load(&core0, &core1);
+    esp_chip_info(&chip);
+    heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    heap_total = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+
+    json_escape(nm, sizeof(nm), s_status.name && s_status.name[0] ? s_status.name : "");
+    json_escape(ssid_esc, sizeof(ssid_esc), wifi_ssid);
+
+    if (s_status.route[0]) snprintf(route_cidr, sizeof(route_cidr), "\"%s\"", s_status.route);
+    else snprintf(route_cidr, sizeof(route_cidr), "null");
+    approved_str = !s_status.route[0] ? "null" : s_status.route_approved > 0 ? "true" :
+                   s_status.route_approved == 0 ? "false" : "null";
+
+    if (derp_task_connected())
+        snprintf(derp_region, sizeof(derp_region), "\"%s\"", derp_task_region_name());
+    else snprintf(derp_region, sizeof(derp_region), "null");
+    derp_connected_str = derp_task_connected() ? "true" : "false";
+
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   reset_tok = "poweron"; break;
+    case ESP_RST_SW:        reset_tok = "sw"; break;
+    case ESP_RST_PANIC:     reset_tok = "panic"; break;
+    case ESP_RST_INT_WDT:   reset_tok = "int_wdt"; break;
+    case ESP_RST_TASK_WDT:  reset_tok = "task_wdt"; break;
+    case ESP_RST_WDT:       reset_tok = "wdt"; break;
+    case ESP_RST_BROWNOUT:  reset_tok = "brownout"; break;
+    case ESP_RST_DEEPSLEEP: reset_tok = "deepsleep"; break;
+    case ESP_RST_EXT:       reset_tok = "ext"; break;
+    default:                reset_tok = "unknown"; break;
+    }
+
+    o += snprintf(page + o, room(cap, o),
+        "{\"state\":\"%s\",\"uptime_s\":%u,"
+        "\"tailnet\":{\"address\":\"%s\",\"name\":\"%s\",\"peers\":%d,"
+        "\"direct\":%d,\"tunnels\":%d,\"packets_rx\":%u,\"packets_tx\":%u},"
+        "\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"channel\":%d,"
+        "\"reconnects\":%u,\"local_ip\":\"%s\"},"
+        "\"route\":{\"cidr\":%s,\"approved\":%s},"
+        "\"system\":{\"version\":\"%s\",\"chip\":\"%s\","
+        "\"cpu0_pct\":%d,\"cpu1_pct\":%d,"
+        "\"heap_free_kb\":%u,\"heap_total_kb\":%u,\"reset_reason\":\"%s\"},"
+        "\"derp\":{\"region\":%s,\"connected\":%s}}",
+        s_status.state ? s_status.state : "unknown",
+        (unsigned)(esp_timer_get_time() / 1000000),
+        bare_addr(s_status.tailnet_addr, bare, sizeof(bare)), nm,
+        peers_count(), s_status.paths_up, magic_tunnels_up(),
+        (unsigned)tun_in, (unsigned)tun_out,
+        ssid_esc, rssi, channel, (unsigned)link_reconnects, ip,
+        route_cidr, approved_str,
+        desc ? desc->version : "?", chip_name(&chip),
+        core0 < 0 ? 0 : core0, core1 < 0 ? 0 : core1,
+        (unsigned)(heap_free / 1024), (unsigned)(heap_total / 1024), reset_tok,
+        derp_region, derp_connected_str);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, page, clamp_len(cap, o));
+    free(page);
+    return ESP_OK;
+}
+
+// Streams a fixed amount of filler as fast as the link allows, so the "Hız
+// testi" button can time how long it takes to arrive and turn that into a
+// real number. README's "1-3 Mbps beklenti" was never measured against an
+// actual client until this - it is a throughput probe, not a diagnostic, so
+// it has no opinion about the transport (Wi-Fi vs tunnel vs relay): the
+// browser's clock covers whichever path the request actually took.
+//
+// The pattern byte is fixed and the buffer is static, not because either one
+// matters for a speed measurement, but because a fresh 4 KB heap allocation
+// per chunk would be its own variable in the result.
+#define SPEEDTEST_CHUNK 4096
+#define SPEEDTEST_MAX (4 * 1024 * 1024)
+#define SPEEDTEST_DEFAULT (1024 * 1024)
+
+static esp_err_t get_speedtest(httpd_req_t *req) {
+    static uint8_t chunk[SPEEDTEST_CHUNK];
+    static bool filled;
+    char qs[32], val[16];
+    long total = SPEEDTEST_DEFAULT;
+
+    if (!filled) { memset(chunk, 0xa5, sizeof(chunk)); filled = true; }
+
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK &&
+        httpd_query_key_value(qs, "bytes", val, sizeof(val)) == ESP_OK) {
+        long v = atol(val);
+        if (v > 0) total = v;
+    }
+    if (total > SPEEDTEST_MAX) total = SPEEDTEST_MAX;
+    if (total < SPEEDTEST_CHUNK) total = SPEEDTEST_CHUNK;
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    {
+        long sent = 0;
+        while (sent < total) {
+            size_t want = (size_t)((total - sent) < SPEEDTEST_CHUNK ?
+                                    (total - sent) : SPEEDTEST_CHUNK);
+            if (httpd_resp_send_chunk(req, (const char *)chunk, want) != ESP_OK)
+                return ESP_FAIL;
+            sent += (long)want;
+        }
+        httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return ESP_OK;
+}
+
+// Switches the panel's language and sends the browser straight back to
+// whichever page it came from ("to"), so the toggle reads as "this page,
+// but in the other language" rather than a trip to some settings screen.
+static esp_err_t post_lang(httpd_req_t *req) {
+    char body[64], lang[8], to[24];
+    int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len
+                                                       : (int)sizeof(body) - 1;
+    int got = httpd_req_recv(req, body, len);
+    if (got <= 0) return httpd_resp_send_500(req);
+    body[got] = '\0';
+
+    if (form_field(body, "lang", lang, sizeof(lang))) {
+        s_lang_en = !strcmp(lang, "en");
+        device_set_lang_en(s_lang_en);
+    }
+    if (!form_field(body, "to", to, sizeof(to)) || !to[0]) strcpy(to, "/");
+
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", to);
+    httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -1009,13 +1692,19 @@ static esp_err_t get_settings(httpd_req_t *req) {
 // registration needs replacing - a changed capability version, an expired
 // key - and much less drastic than forgetting everything.
 static esp_err_t post_rejoin(httpd_req_t *req) {
+    char body[400];
+    resolve_lang(req);
     device_keys_erase();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_sendstr(req,
+    snprintf(body, sizeof(body),
         "<!doctype html><meta charset=utf-8>"
         "<body style='font:16px system-ui;background:#0d1117;color:#e6edf3;padding:24px'>"
-        "Tailnet kimligi silindi. Cihaz yeniden baslayip yeni bir giris "
-        "baglantisi uretecek. Wi-Fi ayarlari duruyor.");
+        "%s",
+        T("Tailnet kimligi silindi. Cihaz yeniden baslayip yeni bir giris "
+          "baglantisi uretecek. Wi-Fi ayarlari duruyor.",
+          "The tailnet identity was erased. The device will restart and generate a new "
+          "login link. Wi-Fi settings are kept."));
+    httpd_resp_sendstr(req, body);
     vTaskDelay(pdMS_TO_TICKS(800));
     esp_restart();
     return ESP_OK;
@@ -1023,9 +1712,10 @@ static esp_err_t post_rejoin(httpd_req_t *req) {
 
 static esp_err_t post_forget(httpd_req_t *req) {
     mark_active();
+    resolve_lang(req);
     device_wifi_erase();
     device_keys_erase();
-    httpd_resp_sendstr(req, "silindi, yeniden başlıyor");
+    httpd_resp_sendstr(req, T("silindi, yeniden başlıyor", "erased, restarting"));
     vTaskDelay(pdMS_TO_TICKS(800));
     esp_restart();
     return ESP_OK;
@@ -1180,6 +1870,9 @@ esp_err_t portal_start(bool captive) {
         httpd_uri_t forget = { .uri = "/forget", .method = HTTP_POST, .handler = post_forget };
         httpd_uri_t settings = { .uri = "/settings", .method = HTTP_GET, .handler = get_settings };
         httpd_uri_t rejoin = { .uri = "/rejoin", .method = HTTP_POST, .handler = post_rejoin };
+        httpd_uri_t lang = { .uri = "/lang", .method = HTTP_POST, .handler = post_lang };
+        httpd_uri_t api = { .uri = "/api/status", .method = HTTP_GET, .handler = get_api_status };
+        httpd_uri_t speedtest = { .uri = "/api/speedtest", .method = HTTP_GET, .handler = get_speedtest };
         // Registered in setup mode too: a device that cannot join any network
         // can still be re-flashed by joining its own, which is one fewer
         // reason to need a cable.
@@ -1192,8 +1885,11 @@ esp_err_t portal_start(bool captive) {
         httpd_register_uri_handler(s_server, &setup);
         httpd_register_uri_handler(s_server, &save);
         httpd_register_uri_handler(s_server, &forget);
+        httpd_register_uri_handler(s_server, &lang);
         if (!captive) httpd_register_uri_handler(s_server, &settings);
         if (!captive) httpd_register_uri_handler(s_server, &rejoin);
+        if (!captive) httpd_register_uri_handler(s_server, &api);
+        if (!captive) httpd_register_uri_handler(s_server, &speedtest);
         httpd_register_uri_handler(s_server, &ota);
     }
 

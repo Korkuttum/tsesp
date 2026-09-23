@@ -41,3 +41,12 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# The default 512 bytes is enough for curl but not for an actual browser: a
+# real POST from Chrome (sec-ch-ua/-mobile/-platform, Sec-Fetch-*, a full
+# Referer, a long User-Agent) runs past it, and esp_http_server rejects the
+# whole request with 431 before any handler runs - the language switch
+# button's first real test failed this way. 512 had apparently always been
+# marginal; nothing before this pushed a same-origin form POST hard enough
+# to notice.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1536

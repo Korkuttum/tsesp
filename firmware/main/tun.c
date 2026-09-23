@@ -83,7 +83,7 @@ static err_t sta_input_trace(struct pbuf *p, struct netif *netif) {
             const uint8_t *tcp = ip + ((ip[0] & 0x0f) * 4);
             uint16_t sport = (uint16_t)((tcp[0] << 8) | tcp[1]);
             {
-                // The mirror of "Hedefe ulaşan": a packet coming back from
+                // The mirror of "Reached the target": a packet coming back from
                 // the exact machine the last forwarded one went to. Together
                 // the two say whether the target answered at all, which is
                 // the question a packet capture on the LAN would answer.

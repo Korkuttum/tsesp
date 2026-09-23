@@ -28,4 +28,12 @@ esp_err_t device_wifi_erase(void);
 bool      device_is_registered(void);
 esp_err_t device_set_registered(bool yes);
 
+// The panel's language, once someone has actually picked one: 0 Turkish,
+// 1 English. Returns false - leaving *en untouched - until that first pick,
+// so the caller can tell "never chosen" apart from "chose Turkish" and fall
+// back to the browser's own Accept-Language for that first request instead
+// of guessing.
+bool      device_lang_pref(bool *en);
+esp_err_t device_set_lang_en(bool en);
+
 #endif

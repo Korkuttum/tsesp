@@ -1,101 +1,128 @@
-# tsesp — ESP32-WROOM-32U için sıfırdan Tailscale istemcisi
+# tsesp — a Tailscale client written from scratch for the ESP32-WROOM-32U
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-PSRAM'siz klasik ESP32'ye (520 KB SRAM) sığacak şekilde yazılmış, taşınabilir C.
-Protokol kodu socket'e hiç dokunmaz; aynı `.c` dosyaları hem POSIX test
-harness'ında hem ESP-IDF firmware'inde derlenir.
+Portable C, written to fit a classic PSRAM-less ESP32 (520 KB SRAM). The
+protocol code never touches a socket; the same `.c` files compile both in the
+POSIX test harness and in the ESP-IDF firmware.
 
-## Durum
+## Status
 
-| Aşama | İş | Durum |
+| Stage | Work | Status |
 |---|---|---|
-| 1 | Kripto: BLAKE2s (anahtarlı dahil), HKDF, X25519, ChaCha20-Poly1305 | ✅ RFC vektörleri |
-| 2 | ts2021 Noise IK handshake + record framing | ✅ canlı sunucuya karşı |
-| 3 | HPACK + HTTP/2 + streaming JSON | ✅ RFC 7541 Ek C; her bölünme noktası |
-| 4 | `/machine/register` → tailnet'e kayıt | ✅ kartta |
-| 5 | `/machine/map` → netmap, peer'lar, DERP haritası | ✅ kartta, uzun bağlantı |
-| 6 | NaCl box + DISCO + STUN | ✅ libsodium/RFC 5769 ile doğrulandı |
-| 7 | Yol keşfi (ping/ölç/seç/canlı tut) | ✅ sahte NAT'lar + gerçek peer'lar |
-| 8 | DERP rölesi (TLS) — varlık **ve** veri | ✅ doğrudan yol kapalıyken test edildi |
-| 9 | WireGuard (Noise IKpsk2) | ✅ gerçek Tailscale düğümleriyle tünel |
-| 10 | lwIP arayüzü — cihaz kendi 100.x adresinde | ✅ ping %0 kayıp, sayfa tünelden |
-| 11 | NAPT subnet routing | ⚠️ NAPT yanlış arayüzdeydi, düzeltildi; **karta yazılıp denenmesi bekliyor** |
-| 12 | ESP-IDF firmware: AP modu, kurulum sayfası, NVS | ✅ |
-| 13 | OTA: tünelden yazılım güncelleme + geri alma | ⚠️ kod hazır, **bir kez kabloyla yazılması bekliyor** |
+| 1 | Crypto: BLAKE2s (keyed included), HKDF, X25519, ChaCha20-Poly1305 | ✅ RFC test vectors |
+| 2 | ts2021 Noise IK handshake + record framing | ✅ against the live server |
+| 3 | HPACK + HTTP/2 + streaming JSON | ✅ RFC 7541 Appendix C; every split point |
+| 4 | `/machine/register` → registering on the tailnet | ✅ on the board |
+| 5 | `/machine/map` → netmap, peers, DERP map | ✅ on the board, long-lived connection |
+| 6 | NaCl box + DISCO + STUN | ✅ verified against libsodium/RFC 5769 |
+| 7 | Path discovery (ping/measure/pick/keep alive) | ✅ fake NATs + real peers |
+| 8 | DERP relay (TLS) — both presence **and** data | ✅ tested with the direct path down |
+| 9 | WireGuard (Noise IKpsk2) | ✅ tunneled with real Tailscale nodes |
+| 10 | lwIP interface — the device shows up at its own 100.x address | ✅ 0% ping loss, the status page over the tunnel |
+| 11 | NAPT subnet routing | ✅ NAPT fix confirmed on the board; in daily use routing to the home network |
+| 12 | ESP-IDF firmware: AP mode, setup page, NVS | ✅ |
+| 13 | OTA: firmware updates over the tunnel + rollback | ✅ the device's only update path since the first wired flash - dozens of updates, no lost device |
 
-Zincirin tamamı kartta çalışıyor:
-
-```
-WiFi kurulumu (AP + kurulum sayfası)
-  -> TCP :80 -> /ts2021 upgrade -> Noise IK -> HTTP/2 -> kayıt -> netmap
-  -> DERP rölesi (TLS 443)         <- varlık ve yedek veri yolu
-  -> DISCO ping/pong               -> doğrudan yol (NAT delme)
-  -> WireGuard (Noise IKpsk2)      -> tünel
-  -> lwIP arayüzü 100.64.0.0/10    -> cihaz ağda görünür
-  -> IP forward + NAPT             -> ev ağındaki cihazlara erişim
-```
-
-Ölçülenler (ESP32-D0WD-V3, 240 MHz):
+The whole chain runs on the board:
 
 ```
-tailnet adresine ping     %0 kayıp, ortalama 20 ms   (doğrudan yol)
-                          %0 kayıp, ortalama 480 ms  (sadece röle)
-durum sayfası tünelden    http 200, 0.36 s
-X25519                    180 ms      <- en yavaş işlem
-ChaCha20-Poly1305         1.35 MB/s   <- veri düzleminin tavanı
-boş heap (her şey açık)   ~97 KB
+Wi-Fi setup (AP + setup page)
+  -> TCP :80 -> /ts2021 upgrade -> Noise IK -> HTTP/2 -> register -> netmap
+  -> DERP relay (TLS 443)          <- presence and the fallback data path
+  -> DISCO ping/pong               -> direct path (NAT hole punching)
+  -> WireGuard (Noise IKpsk2)      -> the tunnel
+  -> lwIP interface 100.64.0.0/10  -> the device is visible on the tailnet
+  -> IP forward + NAPT             -> reaching devices on the home network
 ```
 
-## Kaldığı yer
-
-Sıradaki iş **karta yazmak**. Son iki değişiklik — NAPT'ın doğru arayüze
-taşınması ve OTA — hiç derlenmedi; yazıldıkları ortamda ESP-IDF yoktu. Bölüm
-tablosu da değiştiği için bu kez kabloyla yazmak zorunlu, sonrası tünelden.
+Measured (ESP32-D0WD-V3, 240 MHz):
 
 ```
-git checkout claude/remote-ping-issue-769775
-rm -f firmware/sdkconfig                       # atlanırsa derleme #error ile durur
+ping to the tailnet address    0% loss, 20 ms average    (direct path)
+                                0% loss, 480 ms average   (relay only)
+status page over the tunnel    http 200, 0.36 s
+X25519                         180 ms      <- the slowest single operation
+ChaCha20-Poly1305              1.35 MB/s   <- the data plane's ceiling
+free heap (everything up)      ~97 KB
+```
+
+## Where this stands
+
+The device has been running since the bring-up checklist below was completed:
+subnet routing to the home network works day to day, and every change since —
+including everything in this document past this point — has shipped to it as
+an OTA update over the tunnel, never a second trip with a cable.
+
+Unverified still: stability measured continuously over hours or days rather
+than pieced together across many separate boots, and behavior under real
+load (this is a low-traffic device: SSH, sensors, a status page someone
+checks occasionally).
+
+<details>
+<summary>First bring-up checklist (completed - kept as a reference for
+setting up a new device)</summary>
+
+The last two changes at the time — moving NAPT to the right interface, and
+OTA — had never been compiled; there was no ESP-IDF in the environment they
+were written in, and the partition table had just changed, so that first
+flash had to be wired. Everything after it went over the tunnel:
+
+```
+rm -f firmware/sdkconfig                       # skip this and the build stops with an #error
 cd firmware && idf.py set-target esp32 && idf.py build
-idf.py -p /dev/cu.usbserial-XXXX flash monitor # erase-flash DEĞİL: nvs kalsın
+idf.py -p /dev/cu.usbserial-XXXX flash monitor # NOT erase-flash: keep nvs
 ```
 
-Sonrası sırayla, ve **hepsi evde yapılabilir** — köyü beklemek gerekmiyor:
+What followed, in order, and **all of it doable from home** — no need to wait
+for the village house:
 
-1. **Açılış log'u.** Dört satır: `ota: running ota_0`,
+1. **The boot log.** Four lines: `ota: running ota_0`,
    `tun: interface up: 100.x.x.x/10`, `tun: NAPT on the tunnel side`,
    `offering 192.168.x.0/24 as a route`.
-2. **Rotayı onayla** — admin panel → Machines → cihaz → Subnet routes.
-   Log'da `route ... approved`, durum sayfasında "onaylandı" çıkmalı.
-3. **Ev ağına eriş.** Telefonun Wi-Fi'ını kapat, mobil veriden ev ağındaki bir
-   adrese ping at. Bir kez `tun: routing for the tailnet: ... -> ...` basılmalı
-   ve ping dönmeli. NAPT düzeltmesi burada ya doğrulanır ya çürütülür; sayaçlar
-   (Ağ → Ev ağına uzaktan erişim) hangi yarıda kaldığını söyler.
-4. **OTA.** Sürümü değiştirip ikinci bir build al, tünelden yükle, log'da
-   `ON TRIAL` → `confirmed` geçişini izle.
-5. **Geri almayı da dene**, çünkü denenmemiş bir emniyet kemeri emniyet kemeri
-   değildir: `CONTROL_HOST`'u olmayan bir ada çevirip derle ve yükle. Netmap hiç
-   gelmez, imaj kendini onaylamaz; elle yeniden başlattığında önyükleyici eski
-   slota dönmeli ve sayfa "en son yüklenen yazılım kendini onaylayamadı"
-   demeli.
-6. **Köyde.** Oradaki ağ farklı bir aralıktaysa cihaz yeni rotayı kendisi ilan
-   eder, ama panelde **tekrar onaylanması** gerekir.
+2. **Approve the route** — admin console → Machines → the device → Subnet
+   routes. The log should print `route ... approved`, and the status page
+   should say "approved".
+3. **Reach the home network.** Turn the phone's Wi-Fi off, ping a home-network
+   address from mobile data. `tun: routing for the tailnet: ... -> ...` should
+   print once and the ping should return. This is where the NAPT fix is either
+   confirmed or disproved; the counters (Network → Remote access to the home
+   network) say which half it got stuck on.
+4. **OTA.** Bump the version, build a second image, upload it over the tunnel,
+   watch the log go `ON TRIAL` → `confirmed`.
+5. **Try the rollback too**, because an untested seatbelt is not a seatbelt:
+   point it at a `CONTROL_HOST` that doesn't exist and flash it. No netmap
+   ever arrives, the image never confirms itself; a manual restart should send
+   the bootloader back to the old slot and the page should say "the most
+   recently uploaded firmware could not confirm itself".
+6. **At the village house.** If the network there is a different range, the
+   device advertises the new route itself, but it still needs **approving
+   again** in the console.
 
-Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
-Hız beklentisi 1-3 Mbps.
+</details>
 
-### NAPT yanlış arayüzdeydi
+**Speed, actually measured.** The Network tab's "Speed test" button
+(`/api/speedtest`) downloads 1 MB from the browser to the device and times it
+in JS. Pulling the same 1 MB twice, remotely from home: 63 KB/s over the relay
+(DERP fra) (0.50 Mbps, 16.6 s), then 52 KB/s (0.42 Mbps, 20 s) on a direct path
+that came up a few seconds later. Both are below the "1-3 Mbps" guess this
+document used to carry — that number was never measured, it was an assumption;
+these two are a single real measurement. Not repeated, and what a different
+signal strength or a different home network would give is unknown.
 
-Sahada ilk deneme: cihazın kendi `100.x` adresine ping gidiyor, ev ağındaki
-hiçbir adrese gitmiyor, log'da tek satır yok. Kart elde olmadan, sadece kod
-ve esp-lwip kaynağı okunarak bulundu.
+### NAPT was on the wrong interface
 
-`ip_napt_enable(addr, 1)` bir adresi değil bir **arayüzü** işaretliyor, ve
-esp-lwip'te bayrağın anlamı "kaynağı bu adrese çevir" değil, "bu arayüzden
-*gelen* trafiği çevir":
+The first attempt in the field: the device answers pings to its own `100.x`
+address, nothing on the home network does, and the log has not one line about
+it. Found without the board in hand, purely by reading the code and the
+esp-lwip source.
+
+`ip_napt_enable(addr, 1)` doesn't flag an address, it flags an **interface**,
+and in esp-lwip the flag doesn't mean "translate traffic to this address," it
+means "translate traffic *arriving from* this interface":
 
 ```c
-/* ip4_forward() - netif çıkış arayüzü */
+/* ip4_forward() - the netif is the OUTGOING interface */
 if (!netif->napt) {
     if (ip_napt_forward(p, iphdr, inp, netif) != ERR_OK) return;
 }
@@ -106,53 +133,58 @@ if (!inp->napt) return ERR_OK;
 ip_napt_modify_addr(iphdr, &iphdr->src, ip_2_ip4(&outp->ip_addr)->addr);
 ```
 
-Yani çeviri yalnızca **girdiği** arayüzde bayrak varsa ve **çıktığı**
-arayüzde yoksa yapılıyor; yeni kaynak adresi de çıkış arayüzünden
-okunuyor. Bayrak WiFi arayüzüne konmuştu — tailnet'ten gelip LAN'a çıkan
-paket için çıkış arayüzü tam olarak o, yani `if (!netif->napt)` koşulu
-çeviriyi **bastırıyordu**. Paket ev ağına `100.x` kaynak adresiyle
-çıkıyor, hedef cihaz cevabı modeme yolluyor, modemin 100.64/10'a rotası
-olmadığı için cevap orada ölüyordu. İki uçtan da sessiz.
+So translation only happens when the flag is set on the interface the packet
+**came in on**, and clear on the one it **leaves by**; the new source address
+is also read from the outgoing interface. The flag had been set on the Wi-Fi
+interface — and for a packet arriving from the tailnet and leaving onto the
+LAN, that Wi-Fi interface is exactly the outgoing one, so `if (!netif->napt)`
+was **suppressing** the translation. The packet left for the home network with
+its `100.x` source address intact, the target device sent its reply to the
+modem, and since the modem has no route to 100.64/10, the reply died there.
+Silent on both ends.
 
-Üstelik yanlış bayrak ters yönü açıyordu: LAN'dan tailnet'e giden trafik
-maskeleniyordu — kimsenin istemediği yön. Doğrusu bayrağın tünel
-arayüzünde olması, ve tek bayrakla iki yön birlikte olmuyor: esp-lwip
-modelinde NAPT'lı arayüz "iç" taraftır. Subnet router'ın iç tarafı
-tailnet'tir.
+Worse, the wrong flag was enabling the opposite direction: traffic from the
+LAN toward the tailnet was being masqueraded — the one direction nobody
+wanted. The flag belongs on the tunnel interface, and one flag can't cover
+both directions at once: in esp-lwip's model, the NAPT'd interface is the
+"inside." For a subnet router, the inside is the tailnet.
 
-Bayrak `tun_start()`'a taşındı. Bir yan fayda: NAPT'ın yazdığı adres
-artık hiç yapılandırılmıyor, çıkış arayüzünden alınıyor, yani modem yeni
-bir DHCP adresi verdiğinde yenilenecek bir şey kalmıyor.
+The flag moved into `tun_start()`. A side benefit: the address NAPT writes is
+no longer configured anywhere, it's read from the outgoing interface, so
+there's nothing left to refresh when the modem hands out a new DHCP address.
 
-Elenen hipotez: "flash'taki sdkconfig eski, `CONFIG_LWIP_IP_FORWARD`
-hiç açılmamış olabilir" (`sdkconfig` .gitignore'da ve ESP-IDF, dosya
-varsa `sdkconfig.defaults`'u okumaz). Olamaz: `ip_napt_enable`'ın
-bildirimi `lwip_napt.h` içinde `#if ESP_LWIP / #if IP_FORWARD /
-#if IP_NAPT` ile sarılı. İkisi kapalı olsaydı firmware derlenip
-linklenemezdi, dolayısıyla karttaki imajda ikisi de açık.
+Ruled-out hypothesis: "the sdkconfig on flash is stale, `CONFIG_LWIP_IP_FORWARD`
+might never have been turned on" (`sdkconfig` is gitignored, and ESP-IDF
+doesn't read `sdkconfig.defaults` if the file already exists). Can't be it:
+`ip_napt_enable`'s declaration in `lwip_napt.h` is wrapped in
+`#if ESP_LWIP / #if IP_FORWARD / #if IP_NAPT`. If either were off, the firmware
+couldn't have compiled and linked, so both are on in the image that's on the
+board.
 
-**Denenmedi.** Bu ortamda ESP-IDF yok; düzeltme kaynak okunarak
-çıkarıldı, karta yazılıp bir peer'dan ev ağına ping atılması gerekiyor.
+**Confirmed since.** The fix was worked out by reading the source with no
+board in hand at the time; it has since been flashed and is what subnet
+routing to the home network runs on day to day.
 
-### Cihazın 100.x adresine ping gidiyor ama ev ağına gitmiyor
+### The device answers pings on its own 100.x address but not on the home network
 
-Bu, subnet routing'in tipik arızası ve tek bir anlamı var: tünel çalışıyor
-(cihazın kendi adresi cevap veriyor), ama LAN'a giden yol bir yerde kopuk.
-Kopukluğun iki yarısı vardır ve dışarıdan ikisi de aynı görünür — istek
-buraya hiç ulaşmıyordur, ya da ulaşıp yanıt dönmüyordur. Durum sayfasındaki
-**Ağ → Ev ağına uzaktan erişim** bölümü ikisini ayırır:
+This is the classic subnet-routing failure and it has exactly one meaning:
+the tunnel works (the device's own address answers), but somewhere the path
+to the LAN is broken. The break has two halves and from the outside they look
+identical — either the request never gets here at all, or it gets here and
+the reply never comes back. The status page's **Network → Remote access to
+the home network** section tells them apart:
 
-| Rota onayı | Gelen istek | Dönen yanıt | Sorun |
+| Route approval | Incoming requests | Replies sent back | Problem |
 |---|---|---|---|
-| onay bekliyor | 0 | 0 | Rota admin panelde onaylanmamış |
-| onaylandı | 0 | 0 | Uzaktaki cihaz rotayı kullanmıyor, ya da adres çakışması |
-| onaylandı | artıyor | 0 | Hedef cihaz cevap vermiyor — ya da NAPT düzeltmesi karta yazılmamış |
-| onaylandı | artıyor | artıyor | Yol çalışıyor; sorun uygulama/port tarafında |
+| awaiting approval | 0 | 0 | The route isn't approved in the admin console |
+| approved | 0 | 0 | The remote device isn't using the route, or there's an address collision |
+| approved | rising | 0 | The target device isn't replying — or the NAPT fix hasn't been flashed |
+| approved | rising | rising | The path works; the problem is on the application/port side |
 
-"Rota onayı" cihazın kendi netmap'inden geliyor: onaylanan rotalar düğümün
-`AllowedIPs`'inde geri döner, onaylanmayan hiçbir yerde görünmez. Yani
-"ilan ettim" ile "kullanılıyor" ayrı iki şey, ve cihaz artık hangisinde
-olduğunu söylüyor. Log'da da tek satır olarak geçiyor:
+"Route approval" comes from the device's own netmap: an approved route comes
+back in the node's `AllowedIPs`, an unapproved one shows up nowhere. So
+"advertised" and "in use" are two separate things, and the device now says
+which one it's in. It shows up as a single log line too:
 
 ```
 route 192.168.1.0/24 approved; peers can reach that network through this device
@@ -160,200 +192,215 @@ route 192.168.1.0/24 advertised but NOT approved; approve it in the admin consol
 tun: routing for the tailnet: 100.101.7.3 -> 192.168.1.50 (subnet route is in use)
 ```
 
-Üçüncü satır ilk yönlendirilen pakette bir kez basılır — istek cihaza
-ulaştıysa oradadır, ulaşmadıysa yoktur.
+The third line prints once, on the first packet actually routed — it's there
+if the request reached the device, absent if it didn't.
 
-Gelen istek sıfır kalıyorsa sırayla:
+If incoming requests stay at zero, in order:
 
-1. **Onay.** Admin panel → Machines → cihaz → Subnet routes → rotayı onayla.
-2. **Uzaktaki cihaz rotayı kabul ediyor mu.** Linux'ta varsayılan *kapalı*:
-   `tailscale up --accept-routes`. Mac/Windows/iOS/Android kabul eder.
-   `tailscale status` çıktısında cihazın yanında rota görünmeli.
-3. **Adres çakışması.** En sık sebep bu, ve hiçbir log'a düşmez: bulunduğun
-   yerin yerel ağı da `192.168.1.0/24` ise (Türkiye'de modemlerin
-   varsayılanı), `192.168.1.50`'ye giden paket kendi ağına gider, tünele
-   hiç girmez. Test: `tailscale ping 192.168.1.50` — "no matching route"
-   diyorsa 1 veya 2, kendi ağından cevap geliyorsa çakışma var. Çözümü
-   köy evindeki modemin LAN'ını başka bir aralığa almak
-   (`192.168.37.0/24` gibi); cihaz yeni adresi görünce rotayı kendisi
-   günceller, ama **yeni rotanın panelde tekrar onaylanması gerekir**.
-4. **Mobil veriden dene.** WiFi'ı kapatmak 3. maddeyi bir hamlede eler.
+1. **Approval.** Admin console → Machines → the device → Subnet routes →
+   approve the route.
+2. **Does the remote device accept the route.** Off by default on Linux:
+   `tailscale up --accept-routes`. Mac/Windows/iOS/Android accept it.
+   `tailscale status` should show the route next to the device.
+3. **Address collision.** The most common cause, and it never shows up in any
+   log: if the local network you're standing on is also `192.168.1.0/24` (the
+   default on most modems in Turkey), a packet bound for `192.168.1.50` goes
+   to its own network and never enters the tunnel at all. Test:
+   `tailscale ping 192.168.1.50` — "no matching route" means 1 or 2, an answer
+   from your own network means a collision. The fix is putting the village
+   house modem's LAN on a different range (e.g. `192.168.37.0/24`); the device
+   updates the route itself once it sees the new address, but **the new route
+   still needs approving again in the console**.
+4. **Try it from mobile data.** Turning off Wi-Fi rules out point 3 in one
+   move.
 
-Gelen istek artıyor ama yanıt dönmüyorsa sorun bu cihazda değil: hedef
-kapalı, adresi DHCP ile değişmiş, ya da güvenlik duvarı ICMP'ye cevap
-vermiyor (Windows'ta varsayılan). NAPT sayesinde paketler ev ağına bu
-cihazın kendi adresinden geliyor gibi görünür, yani hedefin tailnet'i
-tanımasına gerek yok — aynı alt ağdan gelen normal bir komşu görür.
-Başka bir ev cihazından ping deneyip hedefin gerçekten ayakta olduğunu
-doğrulamak en hızlı ayrımdır.
+If incoming requests rise but no reply comes back, the problem isn't this
+device: the target is off, its address changed under DHCP, or its firewall
+doesn't answer ICMP (the Windows default). Thanks to NAPT, packets arrive on
+the home network looking like they came from this device's own address, so
+the target doesn't need to know about the tailnet at all — it just sees an
+ordinary neighbor on the same subnet. Pinging from another device on the same
+home network is the fastest way to confirm the target is actually up.
 
-Aynı bölümdeki üçüncü sayaç ("Boyu aşıp düşen") tünel MTU'sundan (1280 bayt)
-uzun olduğu için düşürülen paketleri sayar. Ping ile alakası yok; sıfır
-değilse belirtisi "bağlanıyor ama büyük transferler takılıyor" olur.
+The third counter in the same section ("Dropped (too large)") counts packets
+dropped for being longer than the tunnel's MTU (1280 bytes). Unrelated to
+ping; if it's nonzero the symptom is "connects fine but large transfers stall."
 
-### Modem yeniden başlatma: iki hata
+### Modem restart: two bugs
 
-"WiFi koptuğunda toparlanma" bu listedeydi ve sahada patladı — modem yeniden
-başlatılınca cihaz bir daha bağlanmıyordu. Altından iki ayrı hata çıktı, ve
-ikincisi ancak birincisi düzeltildikten sonra görünür oldu.
+"Recovering after Wi-Fi drops" was on the list, and it broke in the field —
+once the modem restarted, the device never reconnected. Two separate bugs
+turned up underneath, and the second one only became visible once the first
+was fixed.
 
-**1. Yeniden bağlanma bütçesi.** 5 denemelik sayaç sadece `GOT_IP` ile
-sıfırlanıyordu ve tükenince `BIT_FAILED` set ediliyordu — ama o biti bekleyen
-tek yer `net_start()`, o da açılışta çoktan dönmüştü. Bit boşluğa düşüyor,
-`esp_wifi_connect()` bir daha hiç çağrılmıyordu. Beş deneme, modem daha
-açılmadan birkaç saniyede bitiyordu. Artık bütçe yalnızca *ilk* katılım için;
-sonrası sınırsız, 2 sn'den 30 sn'ye çıkan beklemeyle, kendi task'ında.
+**1. The reconnect budget.** The five-try counter was only ever reset by
+`GOT_IP`, and once it ran out it set `BIT_FAILED` — but the only place waiting
+on that bit was `net_start()`, which had already returned at boot. The bit
+fell into a void, and `esp_wifi_connect()` was never called again. Five tries
+burned through in a few seconds, well before the modem had even finished
+booting. The budget now applies only to the *first* join; after that it's
+unlimited, with a wait that climbs from 2 s to 30 s, running in its own task.
 
-**2. `WIFI_FAST_SCAN`.** `wifi_config_t cfg = {0}` yazınca `scan_method` sıfır
-kalıyor, o da fast scan demek: SSID eşleşen **ilk** AP'yi bulunca taramayı
-bırakıp ona bağlanıyor, sinyaline bakmadan. Evde mesh varsa bu yazı tura — ve
-tam modem yeniden başlarken tura geliyor, çünkü elektriği hiç kesilmeyen üst
-kat node'u ilk cevap veren oluyor. Cihaz -80 dBm'de ona kilitlenip DHCP'yi
-tamamlayamıyor, `bcn_timeout` yiyip aynı yere geri dönüyordu.
-`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL` ile bütün kanallar
-taranıp en güçlüsü seçiliyor.
+**2. `WIFI_FAST_SCAN`.** Writing `wifi_config_t cfg = {0}` leaves `scan_method`
+at zero, which means fast scan: stop scanning at the **first** AP with a
+matching SSID and connect to it, regardless of signal. With a mesh at home
+this is a coin flip — and it lands wrong exactly when the modem is restarting,
+because the upstairs node that never lost power is the first to answer. The
+device locks onto it at -80 dBm, can't finish DHCP, times out on `bcn_timeout`
+and lands right back in the same spot. `WIFI_ALL_CHANNEL_SCAN` +
+`WIFI_CONNECT_AP_BY_SIGNAL` scans every channel and picks the strongest.
 
-Üçüncü bir şey de düzeltildi ama sahada patlamamıştı: LAN'a bağlı her şey
-(ilan edilen rota, NAPT'ın yazdığı adres, "bu peer benim ağımda mı" testi)
-açılışta bir kez türetiliyordu. Modem farklı bir IP verirse hepsi bayatlıyor
-ve subnet routing log'da tek satır iz bırakmadan ölüyordu. Artık adres
-değişince yeniden türetiliyor.
+A third thing got fixed too, though it hadn't broken in the field: everything
+tied to the LAN (the advertised route, the address NAPT writes, the "is this
+peer on my network" test) was derived once, at boot. If the modem handed out a
+different IP, all of it went stale and subnet routing died without leaving a
+single line in the log. It's now re-derived whenever the address changes.
 
-Sahada ölçülen (iki kez modem fişten çekildi, ~2 dk bekletildi):
+Measured in the field (the modem was unplugged twice, left off for ~2 min):
 
 ```
-kopma algılandı            beacon timeout'tan 2 sn sonra
-deneme aralığı             2, 4, 8, 16, 30, 30 sn ...  (sınır yok)
-modem kapalıyken           üst kat node'una 3 kez tutundu, -71..-78, adres yok
-modem dönünce              o turdaki taramada -48'lik modemi seçti
-tam toparlanma             kopmadan 97 sn sonra: ip, kontrol düzlemi,
-                           netmap, DERP, 4 WireGuard tüneli
+drop detected              2 s after the beacon timeout
+retry interval              2, 4, 8, 16, 30, 30 s ...  (no ceiling)
+while the modem was off    latched onto the upstairs node 3 times, -71..-78, no address
+once the modem came back   the scan in that round picked the -48 modem
+full recovery               97 s after the drop: ip, control plane,
+                            netmap, DERP, 4 WireGuard tunnels
 ```
 
-97 saniyenin çoğu modemin kendi açılış süresi; cihaz modem geri geldikten
-sonraki ilk taramada bağlandı. Durum sayfasındaki "Kopma sayısı" bunu
-görünür kılıyor.
+Most of the 97 seconds is the modem's own boot time; the device connected on
+the first scan after the modem came back. The status page's "Reconnect count"
+makes this visible.
 
-Hâlâ doğrulanmamış bir senaryo var: zayıf node'dan DHCP adresi **alınabilirse**
-cihaz "bağlandım" deyip orada kalır ve modem dönse bile -80'lik hatta takılı
-kalır, çünkü bağlıyken yeniden tarama yapmıyor. İki testte de olmadı (zayıf
-node adres vermedi), o yüzden "sinyal kötüyse daha iyisini ara" davranışı
-yazılmadı.
+One scenario is still unverified: if the device **can** get a DHCP address
+from the weak node, it declares itself "connected" and stays there — it
+doesn't rescan while connected, so it would stay stuck on -80 even once the
+modem is back. Neither test hit this (the weak node never handed out an
+address), so no "signal is bad, look for something better" behavior was
+written.
 
-### Kurulum portalı artık bir çıkmaz sokak değil
+### The setup portal used to be a dead end
 
-Açılışta kayıtlı ağa bağlanamayınca cihaz kurulum portalını açıyor ve
-`while (1)` ile orada kalıyordu — kayıtlı ağı bir daha hiç denemeden. Bu,
-modem yeniden başlatma hatasının açılış anındaki ikizi: elektrik kesintisinden
-sonra kart iki saniyede, modem bir dakikada açılır; kart ~15 saniyede pes edip
-portalı açar ve kendi ağı gelmesine rağmen orada oturur. Köy evinde kimse de
-reset atamaz.
+If the device couldn't join its saved network at boot, it opened the setup
+portal and stayed there in a `while (1)` — never trying the saved network
+again. This is the boot-time twin of the modem-restart bug: after a power cut,
+the board is up in two seconds, the modem takes a minute; the board gives up
+after ~15 seconds and opens the portal, then sits there even once its own
+network comes back. Nobody can press reset at the village house either.
 
-Açılıştaki bırakma ölçüsü de değişti. "Beş deneme" yanlış birimdi — beş deneme
-saniyeler içinde tükeniyor, modemin açılma süresinden çok kısa. Artık ölçü
-zaman: **90 saniye**. Ama düz 90 saniye de iki ayrı durumu aynı sayıyor, ve
-ESP-IDF bunları zaten ayırt ediyor — `WIFI_REASON_NO_AP_FOUND` (ağ ortada yok,
-beklemeye değer, modem açılıyor olabilir) ile `AUTH_FAIL` / `HANDSHAKE_TIMEOUT`
-(parola tutmuyor, beklemek hiçbir şeyi değiştirmez). Kimlik doğrulama üst üste
-iki kez reddedilirse portal hemen açılıyor; başka her sebepte 90 saniye
-sabrediliyor. Sebep kodu artık log'a da basılıyor, ki "neden bağlanamıyor"
-sorusu bir dahakine tahminle değil tek satırla cevaplansın.
+The give-up threshold at boot changed too. "Five tries" was the wrong unit —
+five tries burn through in seconds, far shorter than the modem's own boot
+time. The measure is now time: **90 seconds**. But a flat 90 seconds still
+treats two different situations as one, and ESP-IDF already tells them apart
+— `WIFI_REASON_NO_AP_FOUND` (the network simply isn't there yet, worth
+waiting, the modem might be booting) versus `AUTH_FAIL` / `HANDSHAKE_TIMEOUT`
+(the password doesn't work, waiting changes nothing). Two authentication
+rejections in a row opens the portal immediately; every other reason gets the
+full 90 seconds of patience. The reason code now prints to the log too, so
+"why won't it connect" gets a single line next time instead of a guess.
 
-Artık portal açıkken kayıtlı ağ iki dakikada bir yeniden deneniyor: açılış
-yolunun kendisi zaten test edilmiş olduğu için deneme `esp_restart()` ile
-yapılıyor. İki koruma var — ilk beş dakika hiç denenmiyor (cihazı yeni
-taşımış biri kurulum ağına katılıp sayfayı açacak kadar süre bulsun), ve
-kurulum sayfası son beş dakikada açıldıysa erteleniyor (yeniden başlatmak,
-yarısı yazılmış parolayı siler). Kayıtlı ağ yoksa hiç denenmiyor.
+While the portal is open, the saved network is now retried every two minutes:
+since the boot path itself is already well-tested, the retry is just an
+`esp_restart()`. Two guards on it — the first five minutes never retry (so
+whoever just carried the device in has time to join the setup network and
+open the page), and a retry is postponed if the setup page was opened in the
+last five minutes (restarting would erase a half-typed password). If there's
+no saved network at all, it never retries.
 
-Cihazı kayıtlı ağın erişemeyeceği bir yere taşıdıysan deneme hiç tutmaz, ve
-maliyeti iki dakikada bir katılma denemesinden ibarettir.
+If the device gets moved somewhere its saved network can't reach, the retry
+simply never catches, and its only cost is one join attempt every two
+minutes.
 
-Kurulum ağının adı artık her açılışta log'a yazılıyor (`tsesp-xxxx`), sadece
-portal açıldığında değil: adı ihtiyaç duymadan önce bilmek bir yolculuk
-kurtarıyor.
+The setup network's name is now logged on every boot (`tsesp-xxxx`), not only
+when the portal opens: knowing the name before you need it saves a trip.
 
-**Bu yolların hiçbiri sahada çalıştırılmadı** — bugün cihaz her açılışta
-bağlanabildi, yani ne 90 saniyelik bekleme, ne sebep koduna göre ayrım, ne de
-portaldan geri dönüş bir kez olsun tetiklendi. Normal açılışın bozulmadığı
-doğrulandı, o kadar. Kod yazılırken iki hatası çıktı ve ikisi de
-çıktıya bakılarak yakalandı (log satırı AP adı hesaplanmadan basılıyordu;
-boşta kalma süresi hiç açılmamış portal için yanlış hesaplanıyor, özelliği
-ilk beş dakika devre dışı bırakıyordu). Doğrulaması kolay: modemi kapat,
-kartı yeniden başlat, portalın açılmasını bekle, modemi aç — beş dakika
-içinde kendiliğinden dönmeli.
+**None of these paths ran in the field** — the device has connected on every
+boot so far, so neither the 90-second wait, nor the reason-based split, nor
+the retry-from-the-portal path has fired even once. What was confirmed is
+that normal boot still works. Two bugs turned up while writing this, and both
+were caught just by looking at the output (a log line was printing the AP
+name before it was computed; the idle-time measurement was wrong for a portal
+that had never opened, disabling the feature for the first five minutes).
+Easy to verify: turn the modem off, restart the board, wait for the portal to
+open, turn the modem back on — it should come back on its own within five
+minutes.
 
-### Subnet routing: paket hiç kablodan çıkmıyordu
+### Subnet routing: the packet never left the wire
 
-Rota onaylandı, NAPT bayrağı doğru arayüzdeydi, çeviri sağlaması doğruydu —
-ve yine de tünelden geçen hiçbir istek ev ağındaki bir cihaza ulaşmıyordu.
-Saatlerce süren ölçüm zinciri ("Gelen istek" → "Ağa çıkarılan" → "Hedefe
-ulaşan") her aşamada pozitif görünüyordu, ama gerçek bir hedeften tek bir
-bayt bile geri gelmiyordu.
+The route was approved, the NAPT flag was on the right interface, the
+translation checksum was correct — and still not one request that made it
+through the tunnel reached a device on the home network. The measurement
+chain ("Incoming requests" → "Forwarded onto the network" → "Reached the
+target") looked positive at every stage for hours, but not a single byte ever
+came back from a real target.
 
-Kök sebep esp-lwip'te değil, `tun_input()`'un kendi pbuf ayırma çağrısındaydı:
-`pbuf_alloc(PBUF_RAW, ...)`, Ethernet header'ı için pbuf'ın başında hiç yer
-bırakmıyor. Cihazın kendi tailnet adresine gelen paket sorun çıkarmıyordu,
-çünkü o `ip4_input`'ta yerelden teslim ediliyor, `netif->output` hiç
-çağrılmıyor. Ama **her yönlendirilen paket** `ip4_forward → netif->output →
-ethernet_output` yoluna giriyor, orada 14 baytlık Ethernet header eklenmeye
-çalışılıyor (`pbuf_add_header`), yer olmadığı için başarısız oluyor,
-`ERR_BUF` dönüyor — ve hiçbir çağıran bu dönüş değerine bakmadığı için paket
-sessizce kayboluyordu. WiFi çipine hiç ulaşmadan.
+The root cause wasn't in esp-lwip, it was in `tun_input()`'s own pbuf
+allocation call: `pbuf_alloc(PBUF_RAW, ...)` leaves no room at the front of the
+pbuf for an Ethernet header. A packet addressed to the device's own tailnet
+address never hit the problem, because that one is delivered locally inside
+`ip4_input` and `netif->output` is never called. But **every routed packet**
+goes through `ip4_forward → netif->output → ethernet_output`, which tries to
+add a 14-byte Ethernet header there (`pbuf_add_header`), fails for lack of
+room, returns `ERR_BUF` — and since nothing that called it checked the return
+value, the packet vanished silently. It never reached the Wi-Fi chip at all.
 
-Bu, hem sabahki esp-lwip NAPT denemesinde hem öğleden sonra yazılan kendi
-NAT katmanında (`src/nat.c`) aynı köşede gizliydi — ikisi de doğru
-çalışıyordu, ikisinin de teslim edecek yolu yoktu. "Ağa çıkarılan" sayacının
-pozitif çıkmasının sebebi de buydu: `netif->output`'un dönüş kodu hiç
-okunmuyordu, paket "gönderildi" sanılıyordu.
+This was hiding in the same corner both in the morning's esp-lwip NAPT
+attempt and in the afternoon's own NAT layer (`src/nat.c`) — both worked
+correctly, and neither had anywhere to deliver to. That's also why the
+"Forwarded onto the network" counter kept coming back positive: nothing ever
+read `netif->output`'s return code, so the packet was assumed "sent."
 
-Düzeltme tek satır: `PBUF_RAW` → `PBUF_LINK`. Kartta doğrulandı — üç ayrı
-LAN hedefine (extender, IoT cihazı) tünelden istek gitti, cevap döndü,
-sayfa açıldı.
+The fix is one line: `PBUF_RAW` → `PBUF_LINK`. Confirmed on the board — a
+request over the tunnel reached three separate LAN targets (an extender, an
+IoT device), the reply came back, the page loaded.
 
-### WireGuard: rekey tüneli kesiyordu
+### WireGuard: rekeys were cutting the tunnel
 
-Kart günlüğünde `wireguard type 4 ... rejected (-1)` satırları göze çarptı.
-Bir kısmı zararsız — her yeniden başlatmadan sonra peer'lar bir süre artık var
-olmayan bir oturuma paket yollar, bunu her implementasyon düşürür. Ama
-reddetmeler tam peer'ların handshake başlattığı saniyelerde kümeleniyordu.
+Lines like `wireguard type 4 ... rejected (-1)` stood out in the board's log.
+Some of it is harmless — after every restart, peers spend a while sending
+packets to a session that no longer exists, and every implementation drops
+those. But the rejections were clustering in exactly the seconds a peer
+started a handshake.
 
-Sebep: peer başına **tek anahtar yuvası** vardı. Hem `wg_create_initiation`
-hem `consume_initiation`, hâlâ trafik taşıyan oturumun `local_index` ve
-`state` alanlarının üstüne yazıyordu. Sonuç, rekey başladığı andan cevap
-gelene kadar tünelin çift yönlü kapanması — gelen paket eşleşmiyor, giden
-`wg_encrypt` de reddediyor. Rekey cevapsız kalırsa oturum tamamen ölüyordu,
-oysa spec eski anahtarlara 60 saniye daha tanıyor (`REKEY_AFTER` 120 sn,
-`REJECT_AFTER` 180 sn; o aralık tam bunun için var).
+The cause: there was a **single key slot** per peer. Both
+`wg_create_initiation` and `consume_initiation` were overwriting the
+`local_index` and `state` fields of the session that was still actively
+carrying traffic. The result was the tunnel closing in both directions from
+the moment a rekey started until the reply arrived — an incoming packet no
+longer matched, and `wg_encrypt` rejected outgoing traffic too. If the rekey
+went unanswered, the session died completely, even though the spec gives the
+old keys another 60 seconds (`REKEY_AFTER` is 120 s, `REJECT_AFTER` 180 s;
+that gap exists for exactly this).
 
-Gerçek WireGuard bir kuşak geriyi saklar. Artık burada da `wg_keypair prev`
-var: `consume_transport` önce güncel anahtara, tutmazsa öncekine bakıyor;
-`wg_encrypt` rekey uçuştayken eski anahtarla göndermeye devam ediyor.
-Maliyet `wg_device` için +896 bayt.
+Real WireGuard keeps one generation back. There's now a `wg_keypair prev`
+here too: `consume_transport` checks the current key first, falling back to
+the previous one if that fails; `wg_encrypt` keeps sending with the old key
+while a rekey is in flight. The cost is +896 bytes for `wg_device`.
 
-İkinci bulgu: kapalı bir peer'a handshake denemesi 5 saniyede bir, sonsuza
-kadar tekrarlıyordu. Her deneme iki X25519, bu kartta ~360 ms. Artık ikiye
-katlanan, 60 saniyede sınırlanan bir bekleme var.
+Second finding: a handshake attempt to a peer that's down repeated forever,
+every 5 seconds. Each attempt is two X25519 operations, ~360 ms on this board.
+There's now a wait that doubles, capped at 60 seconds.
 
-Testler eski kodda düşüyor, yenisinde geçiyor (`./build/wireguard_test`).
-Kartta ölçülen: ilk 40 saniyeden sonra 5 peer-handshake, sıfır reddetme;
-kapalı peer'a denemeler 5.6 → 11.3 → 20.8 sn aralıklarla seyreldi.
+Tests fail on the old code and pass on the new one (`./build/wireguard_test`).
+Measured on the board: after the first 40 seconds, 5 peer handshakes, zero
+rejections; attempts against a down peer spread out to 5.6 → 11.3 → 20.8 s
+intervals.
 
-## Uzaktan güncelleme (OTA)
+## Remote updates (OTA)
 
-Cihaz köy evinde; reset atabilecek en yakın insan bir saatlik yol ve belki bir
-hafta uzakta. O yüzden güncelleme "yaz ve inan" değil: önyükleyici çalışan
-imajı saklıyor, yeni imaj **deneme** olarak açılıyor, ve ancak kendini
-kanıtladıktan sonra kalıcı oluyor.
+The device lives at the village house; the nearest person who could press
+reset is an hour's drive away and maybe a week out. So an update isn't
+"flash it and hope" — the bootloader keeps the running image around, the new
+image comes up **on trial**, and it only becomes permanent once it proves
+itself.
 
-### Bir kerelik kablo
+### One wired flash
 
-Eski bölüm tablosunda tek `factory` bölümü vardı — OTA'nın ikinci bir app
-slotu ve `otadata`'sı olmadan çalışması mümkün değil, bölüm tablosu da app
-seviyesinden değiştirilemiyor. Yani **bu sefer kabloyla yazmak zorunlu**,
-sonrası tünelden.
+The old partition table had a single `factory` partition — OTA can't work
+without a second app slot and its own `otadata`, and the partition table
+can't be changed from application level. So **this one flash has to be
+wired**, everything after it goes over the tunnel.
 
-Yer, hiçbir şeyin mount etmediği 1.9 MB'lık spiffs bölümünden geldi:
+The room came from a 1.9 MB spiffs partition that nothing was mounting:
 
 ```
 nvs       data  nvs     0x009000 ..0x00F000      24 KB
@@ -363,266 +410,289 @@ ota_0     app   ota_0   0x020000 ..0x200000    1920 KB
 ota_1     app   ota_1   0x200000 ..0x3E0000    1920 KB
 ```
 
-`nvs` yerinde ve aynı boyutta kaldı, `idf.py flash` de ona dokunmuyor: yeni
-tabloya geçmek ne Wi-Fi bilgisini ne tailnet kimliğini siliyor. `erase-flash`
-silerdi, çalıştırmaya da gerek yok.
+`nvs` stayed where it was and the same size, and `idf.py flash` doesn't touch
+it either: switching to the new table erases neither the Wi-Fi credentials
+nor the tailnet identity. `erase-flash` would — there's no need to run it.
 
 ```
-rm -f firmware/sdkconfig        # sdkconfig.defaults yeniden okunsun
+rm -f firmware/sdkconfig        # let sdkconfig.defaults be read again
 cd firmware && idf.py set-target esp32 && idf.py build
 idf.py -p /dev/cu.usbserial-0001 flash monitor
 ```
 
-İlk satır önemli: `sdkconfig` .gitignore'da ve ESP-IDF, dosya varsa
-`sdkconfig.defaults`'u **okumuyor**. Unutulursa yeni bölüm tablosu ve rollback
-ayarı sessizce uygulanmaz — o yüzden `ota.c` ile `tun.c`'ye birer `#error`
-kondu: eksik ayarla derleme, sebebini ve çözümünü söyleyerek durur.
+The first line matters: `sdkconfig` is gitignored, and ESP-IDF does **not**
+read `sdkconfig.defaults` if the file already exists. Forget it, and the new
+partition table and the rollback setting silently don't apply — which is why
+`ota.c` and `tun.c` each carry an `#error`: building with a missing option
+stops, naming the cause and the fix.
 
-Slot başına 1920 KB var, en son ölçülen firmware 1.06 MB: ~860 KB pay.
-Sığmazsa derleme yüksek sesle patlar, o da kablo elindeyken olacağı için
-sorun değil.
+There's 1920 KB per slot, and the most recently measured firmware is 1.06 MB:
+~860 KB of headroom. If it doesn't fit, the build fails loudly, which is fine
+since that happens with the cable in hand anyway.
 
-### Sonraki her güncelleme tünelden
+### Every update after that, over the tunnel
 
 ```
 curl -H 'Expect:' --data-binary @firmware/build/tsesp.bin \
      http://100.115.225.84/ota
 ```
 
-Ya da durum sayfası → Ayarlar → Yazılım güncelleme: dosyayı seç, yükle,
-yüzde göstergesini izle. İmaj ham gövde olarak gidiyor; multipart yok, yani
-97 KB heap'te ayrıştırılacak bir sarmalayıcı da yok.
+Or the status page → Settings → Firmware update: pick the file, upload, watch
+the percentage. The image goes up as the raw body; no multipart, so there's no
+wrapper to parse on a chip with 97 KB of heap either.
 
-Cihaz yazmadan önce imajın ilk 288 baytını kontrol ediyor: ESP32 imaj sihirli
-baytı, app tanımlayıcısı, ve **proje adı**. Ulaşamadığın bir karta alakasız
-bir `.bin` yazmak geri dönüşü olmayan tek hata, ve iki kontrol de zaten
-başlıkta.
+Before writing, the device checks the image's first 288 bytes: the ESP32 image
+magic byte, the app descriptor, and the **project name**. Writing an unrelated
+`.bin` to a board you can't reach is the one mistake with no way back, and
+both checks are already right there in the header.
 
-### Deneme süresi ve geri alma
+### Trial period and rollback
 
-Yeni imaj `PENDING_VERIFY` olarak açılıyor. Kalıcı olması iki koşula bağlı:
+The new image comes up as `PENDING_VERIFY`. Becoming permanent depends on two
+conditions:
 
-1. **netmap geldi** — yani Wi-Fi, kontrol düzlemi ve kayıt çalışıyor, cihaz
-   yine uzaktan erişilebilir durumda,
-2. **açılışın 120. saniyesi geçti** — açılıp kaydolduktan sonra panikleyen bir
-   imaj yoksa kendini onaylayıp cihazı sonsuz yeniden başlama döngüsünde
-   bırakabilirdi.
+1. **the netmap arrived** — meaning Wi-Fi, the control plane and registration
+   all work, and the device is reachable remotely again,
+2. **120 seconds since boot have passed** — without this, an image that panics
+   right after booting and registering could confirm itself and leave the
+   device in an endless restart loop.
 
-İkisi olunca `esp_ota_mark_app_valid_cancel_rollback()` çağrılıyor ve log'a
-tek satır düşüyor. Olmazsa: imaj çalışmaya devam eder, ama **bir sonraki
-açılışta** önyükleyici eski slota döner. Bozuk bir güncelleme bir yeniden
-başlamaya mal olur, yola çıkmaya değil.
+Once both are true, `esp_ota_mark_app_valid_cancel_rollback()` is called and a
+single line goes to the log. If not: the image keeps running, but **on the
+next boot** the bootloader falls back to the old slot. A broken update costs
+one restart, not a trip out to fix it.
 
-Bunun bedeli de var ve bilerek kabul edildi: deneme süresi tamamlanmadan
-elektrik kesilirse (köyde olur) sağlıklı bir imaj da geri alınır. Yön olarak
-güvenli taraf bu. Geri alma sessiz de değil — durum sayfası "en son yüklenen
-yazılım kendini onaylayamadı" notunu gösteriyor, yoksa geri dönmüş bir
-güncelleme hiç yüklenmemiş gibi görünürdü.
+This has a cost too, and it was accepted on purpose: if the power cuts before
+the trial period completes (it happens at the village house), a perfectly
+healthy image gets rolled back as well. As a direction, that's the safe side
+to fail on. The rollback isn't silent either — the status page shows a note
+saying the most recently uploaded firmware couldn't confirm itself, otherwise
+a reverted update would look like it was never uploaded at all.
 
-Kurulum modunda da (`tsesp-xxxx` ağı) `/ota` açık: hiçbir ağa katılamayan bir
-cihaz kendi ağından yeniden yazılabiliyor — kabloya bir ihtiyaç daha az.
+`/ota` is open in setup mode too (the `tsesp-xxxx` network): a device that
+can't join any network can still be reflashed by joining its own — one fewer
+reason to need a cable.
 
-**Denenmedi.** Bu ortamda ESP-IDF yok; yazılan kod derlenmedi. Üretilen
-sayfanın JavaScript'i `node --check` ile doğrulandı, bölüm tablosu hizalama ve
-taşma için hesaplandı, gerisi karta yazıldığında görülecek.
+**Confirmed since.** This was written and reasoned about with no ESP-IDF in
+the environment at the time - the page's JavaScript was only checked with
+`node --check`, and the partition table only worked out by hand. Since then
+it has become the device's only update mechanism: dozens of ordinary OTA
+cycles, all confirming within the trial window. None of them has ever
+actually needed the rollback path - it hasn't failed to confirm even once in
+practice, which says the trial period is working, not that rollback itself
+has been exercised for real.
 
-## Neden PSRAM'siz çalışabiliyor
+## Why it works without PSRAM
 
-İki karar bütün farkı yaratıyor:
+Two decisions make the whole difference:
 
-1. **Kontrol düzlemi düz HTTP port 80 üzerinden.** `/ts2021` TLS istemiyor — Noise
-   zaten uçtan uca şifreliyor. Kontrol sunucusunun public key'i `ts2021.h`'de
-   pinli, yani `/key` çağrısı da gerekmiyor. **mbedTLS hiç linklenmiyor: ~45 KB heap kurtuldu.**
-2. **Netmap asla tamamen bellekte tutulmayacak** (Aşama 5). HTTP/2 DATA
-   frame'lerinden akarken parse edilip peer başına ~100 baytlık kayda indirgenecek.
-   Referans implementasyonların 512 KB buffer istemesinin sebebi bu adımı atlamaları.
+1. **The control plane runs over plain HTTP on port 80.** `/ts2021` doesn't
+   need TLS — Noise already encrypts end to end. The control server's public
+   key is pinned in `ts2021.h`, so a `/key` call isn't needed either.
+   **mbedTLS is never linked in at all: that recovers ~45 KB of heap.**
+2. **The netmap is never held whole in memory** (Stage 5). It's parsed while
+   streaming out of HTTP/2 DATA frames and reduced to roughly a 100-byte
+   record per peer. That's the step reference implementations skip, which is
+   why they ask for a 512 KB buffer.
 
-Ölçülen maliyet (tüm kontrol düzlemi, -Os host derlemesi):
+Measured cost (the whole control plane, `-Os` host build):
 
 ```
-kod + sabit veri   32.0 KB      (xtensa'da ~40 KB bekle)
+code + rodata      32.0 KB      (expect ~40 KB on xtensa)
 RAM                15.1 KB      ts_control        13.5 KB
                                   noise rx+tx      8.2 KB
                                   HPACK            2.9 KB
-                                  h2 başlık bloğu  2.0 KB
+                                  h2 header block  2.0 KB
                                 netmap parser      1.6 KB
-                                  tek peer         0.6 KB  <- peer sayısından bağımsız
+                                  one peer         0.6 KB  <- independent of peer count
 ```
 
-6 peer'lı gerçek bir tailnet'ten netmap çekildi; 300 peer'da RAM aynı kalır,
-çünkü peer'lar tek tek callback'e verilip unutuluyor.
+The netmap was pulled from a real tailnet with 6 peers; RAM stays the same at
+300 peers, because peers are handed to a callback one at a time and forgotten.
 
-Karşılaştırma: referans implementasyonlar aynı iş için 512 KB buffer istiyor.
-Fark akıllılıktan değil, iki karardan geliyor — TLS yok, ve netmap hiçbir zaman
-bütün olarak bellekte tutulmuyor.
+For comparison: reference implementations ask for a 512 KB buffer for the same
+job. The difference isn't cleverness, it comes from two decisions — no TLS,
+and the netmap is never held whole in memory.
 
-## Derle ve çalıştır (Mac/Linux, kart gerekmez)
-
-```
-make                       # her şeyi derle
-./build/selftest           # kripto known-answer testleri
-./build/hpack_test         # RFC 7541 Ek C
-./build/json_test          # streaming parser, her bölünme noktası
-./build/route_test         # rota onayı: netmap'ten okunan AllowedIPs
-./build/ts2021_handshake   # canlı sunucuyla Noise handshake
-./build/register_test      # tam yığın: kayıt isteği -> login URL
-./build/stun_test          # STUN parser + canlı sorgu
-./build/netmap_test        # kayıtlı node'un netmap'ini çek
-./build/h2_probe           # tünel içindeki ham baytları dök (teşhis)
-```
-
-`register_test` auth key olmadan çalıştırıldığında sunucu sadece bir login URL'i
-döner ve **hiçbir tailnet'e hiçbir şey eklenmez**. Cihazı gerçekten katmak için:
+## Build and run (Mac/Linux, no board needed)
 
 ```
-TSESP_AUTHKEY=tskey-auth-...  ./build/register_test     # anahtarla, tek adımda
-TSESP_FOLLOWUP=<login-url>    ./build/register_test     # URL onaylanana kadar bekle
+make                       # build everything
+./build/selftest           # crypto known-answer tests
+./build/hpack_test         # RFC 7541 Appendix C
+./build/json_test          # streaming parser, every split point
+./build/route_test         # route approval: AllowedIPs read from the netmap
+./build/ts2021_handshake   # Noise handshake against the live server
+./build/register_test      # the full stack: register request -> login URL
+./build/stun_test          # STUN parser + a live query
+./build/netmap_test        # fetch a registered node's netmap
+./build/h2_probe           # dump the raw bytes inside the tunnel (diagnostic)
 ```
 
-Headscale'e karşı: `./build/register_test <host> <port>` — ayrıca kendi
-sunucunun key'ini `TS2021_TAILSCALE_CONTROL_KEY` yerine koy.
+Run `register_test` without an auth key and the server only hands back a
+login URL — **nothing gets added to any tailnet**. To actually join a device:
 
-## Dosyalar
+```
+TSESP_AUTHKEY=tskey-auth-...  ./build/register_test     # with a key, one step
+TSESP_FOLLOWUP=<login-url>    ./build/register_test     # wait until the URL is approved
+```
+
+Against Headscale: `./build/register_test <host> <port>` — and swap your own
+server's key in for `TS2021_TAILSCALE_CONTROL_KEY`.
+
+## Files
 
 ```
 include/tscrypto.h        src/blake2s.c          BLAKE2s + HMAC + HKDF
                           src/x25519.c           X25519 (TweetNaCl ladder, public domain)
                           src/chacha20poly1305.c
 include/ts2021.h          src/ts2021.c           Noise IK handshake + record framing
-include/ts_io.h           src/ts_io.c            bayt akışı soyutlaması
-include/ts_noise_stream.h src/ts_noise_stream.c  Noise record'ları -> bayt akışı
+include/ts_io.h           src/ts_io.c            byte-stream abstraction
+include/ts_noise_stream.h src/ts_noise_stream.c  Noise records -> byte stream
 include/hpack.h           src/hpack.c            HPACK codec
-                          src/hpack_tables.c     ÜRETİLMİŞ - tools/gen_hpack.py
-include/h2.h              src/h2.c               minimal HTTP/2 istemcisi
+                          src/hpack_tables.c     GENERATED - tools/gen_hpack.py
+include/h2.h              src/h2.c               minimal HTTP/2 client
 include/json_stream.h     src/json_stream.c      push-mode JSON parser
-include/ts_netmap.h       src/ts_netmap.c        netmap çerçeveleme + peer çıkarma
+include/ts_netmap.h       src/ts_netmap.c        netmap framing + peer extraction
 include/stun.h            src/stun.c             STUN binding
-include/poly1305.h        src/poly1305.c         Poly1305 (AEAD ve NaCl ortak kullanır)
+include/poly1305.h        src/poly1305.c         Poly1305 (shared by AEAD and NaCl)
 include/nacl_box.h        src/nacl_box.c         Salsa20/HSalsa20 + NaCl secretbox
-include/disco.h           src/disco.c            DISCO mesaj çerçeveleme
-include/ts_path.h         src/ts_path.c          yol keşfi ve seçimi
-include/ts_client.h       src/ts_client.c        cihaz durum makinesi
+include/disco.h           src/disco.c            DISCO message framing
+include/ts_path.h         src/ts_path.c          path discovery and selection
+include/ts_client.h       src/ts_client.c        the device's state machine
 include/ts_control.h      src/ts_control.c       upgrade + handshake + /machine/*
 
-firmware/main/main.c                             açılış sırası + kontrol görevi
-firmware/main/net.c, portal.c                    WiFi, kurulum portalı, durum sayfası
-firmware/main/magic.c                            UDP socket, DISCO, WireGuard sürücüsü
-firmware/main/derp_task.c, tls_io.c              röle bağlantısı
-firmware/main/tun.c                              lwIP arayüzü + NAPT (subnet routing)
-firmware/main/ota.c                              tünelden güncelleme + geri alma
-firmware/main/peers.c, device_nvs.c              peer tablosu, kalıcı kimlik
-firmware/partitions.csv                          iki app slotu + otadata
+firmware/main/main.c                             boot sequence + control task
+firmware/main/net.c, portal.c                    Wi-Fi, setup portal, status page
+firmware/main/magic.c                            UDP socket, DISCO, WireGuard driver
+firmware/main/derp_task.c, tls_io.c              relay connection
+firmware/main/tun.c                              lwIP interface + NAPT (subnet routing)
+firmware/main/ota.c                              updates over the tunnel + rollback
+firmware/main/peers.c, device_nvs.c              peer table, persistent identity
+firmware/partitions.csv                          two app slots + otadata
 
-host/sim_net.c                                   sahte UDP ağı + sahte NAT'lar
-host/posix_io.c                                  TEK platforma özgü dosya
-host/*_test.c, host/h2_probe.c                   test ve teşhis
-tools/gen_hpack.py, tools/gen_hpack_vectors.py   RFC'den tablo/vektör üretimi
-tools/gen_nacl_vectors.py                        libsodium'dan NaCl vektörleri
+host/sim_net.c                                   fake UDP network + fake NATs
+host/posix_io.c                                  the ONE platform-specific file
+host/*_test.c, host/h2_probe.c                   tests and diagnostics
+tools/gen_hpack.py, tools/gen_hpack_vectors.py   table/vector generation from the RFC
+tools/gen_nacl_vectors.py                        NaCl vectors from libsodium
 ```
 
-NaCl vektörleri de elle yazılmadı — `make nacl-vectors` onları libsodium'dan
-(PyNaCl üzerinden) üretir. Mesaj uzunlukları 32 baytın iki yanına düşecek
-şekilde seçilmiştir, çünkü NaCl anahtar akışının ilk 32 baytını Poly1305
-anahtarına ayırır ve elle yazılmış bir uygulamanın yanılması en olası yer
-orasıdır.
+The NaCl vectors weren't hand-written either — `make nacl-vectors` generates
+them from libsodium (via PyNaCl). Message lengths are chosen to land on both
+sides of 32 bytes, because NaCl's keystream reserves its first 32 bytes for
+the Poly1305 key, and that's the most likely place for a hand-written
+implementation to get it wrong.
 
-Elle yazılmış tek bir tablo yok: HPACK'in statik tablosu, Huffman kodu ve test
-vektörleri RFC 7541'in metninden üretiliyor, ve üretici Huffman kodunun kanonik
-olduğunu doğruluyor (decoder buna dayanıyor).
+Not a single table was hand-written: HPACK's static table, its Huffman code,
+and the test vectors are all generated from the text of RFC 7541, and the
+generator verifies the Huffman code it produces is canonical (the decoder
+depends on that).
 
-## Protokol notları (Tailscale kaynağından çıkarıldı)
+## Protocol notes (worked out from the Tailscale source)
 
 ```
 Noise_IK_25519_ChaChaPoly_BLAKE2s
-prologue    "Tailscale Control Protocol v" + capver   (şu an 146)
+prologue    "Tailscale Control Protocol v" + capver   (currently 146)
 initiation  [2b ver][1b type=1][2b len=96][32b eph pub][48b enc machine pub][16b tag]
 response    [1b type=2][2b len=48][32b eph pub][16b tag]
-transport   [1b type=4][2b len][ct||16b tag]   max frame 4096, header authenticate EDİLMEZ
-nonce       4 sıfır bayt + big-endian uint64 sayaç, AAD yok
+transport   [1b type=4][2b len][ct||16b tag]   max frame 4096, header is NOT authenticated
+nonce       4 zero bytes + a big-endian uint64 counter, no AAD
 HTTP upgrade  POST /ts2021, Upgrade: tailscale-control-protocol,
               X-Tailscale-Handshake: base64(initiation) → 101 Switching Protocols
 ```
 
-## Lisans
+## License
 
-MIT — bkz. [LICENSE](LICENSE). Üçüncü taraf kod ve atıflar için [NOTICE.md](NOTICE.md).
+MIT — see [LICENSE](LICENSE). Third-party code and attribution in
+[NOTICE.md](NOTICE.md).
 
-Tailscale Inc. ile ilişkili değildir, onun tarafından onaylanmamıştır.
+Not affiliated with, or endorsed by, Tailscale Inc.
 
-## Gereksinimler
+## Requirements
 
-### Donanım
+### Hardware
 
-**Test edilen:** ESP32-D0WD-V3 (WROOM-32U), 4 MB flash, PSRAM yok, 240 MHz.
-Bütün ölçümler bu çipte alındı ve aşağıdaki her şey bu kartta çalıştırıldı.
+**Tested on:** ESP32-D0WD-V3 (WROOM-32U), 4 MB flash, no PSRAM, 240 MHz. Every
+measurement here was taken on this chip, and everything below ran on this
+board.
 
-**Asgari gereksinimler:**
+**Minimum requirements:**
 
 | | |
 |---|---|
-| Flash | **4 MB** — `partitions.csv` OTA için iki app slotu veriyor, her biri 1920 KB; derlenen firmware 1.06 MB. 2 MB'lık bir modülde iki slot sığmaz: tek slotlu bir tabloya dönmen ve OTA'dan vazgeçmen gerekir. |
-| RAM | PSRAM gerekmiyor. Her şey ayaktayken ~97 KB heap boş kalıyor. |
-| WiFi | 2.4 GHz. Kurulum portalı için AP+STA modu kullanılıyor. |
-| ESP-IDF | v5.3.1 ile geliştirildi ve test edildi. |
+| Flash | **4 MB** — `partitions.csv` gives OTA two app slots of 1920 KB each; the built firmware is 1.06 MB. Two slots don't fit on a 2 MB module: you'd have to go back to a single-slot table and give up OTA. |
+| RAM | No PSRAM needed. ~97 KB of heap stays free with everything up. |
+| Wi-Fi | 2.4 GHz. The setup portal uses AP+STA mode. |
+| ESP-IDF | Built and tested with v5.3.1. |
 
-### Diğer ESP32 çeşitleri
+### Other ESP32 variants
 
-Kodda assembly yok, çipe özel register yok, endian varsayımı yok — kripto
-bayt bayt okuyor. Yani taşınabilir olması **bekleniyor**, ama beklemek test
-değil:
+There's no assembly in the code, no chip-specific registers, no endianness
+assumptions — the crypto reads byte by byte. So it's **expected** to be
+portable, but expecting isn't testing:
 
-| Çip | Durum |
+| Chip | Status |
 |---|---|
-| ESP32 (WROOM-32/32D/32U, WROVER) | ✅ **çalıştırıldı** (WROOM-32U), diğerleri aynı çekirdek |
-| ESP32-S3 | ⚠️ **temiz derleniyor**, karta atılmadı |
-| ESP32-C3 / C6 / H2 (RISC-V) | ❓ **denenmedi** — bu makinede RISC-V derleyicisi kurulu değil (`install.sh esp32c3` gerekir) |
-| ESP32-S2 | ❓ denenmedi |
-| ESP8266 | ❌ olmaz — ESP-IDF v5 desteklemiyor, RAM de yetmez |
+| ESP32 (WROOM-32/32D/32U, WROVER) | ✅ **run** (WROOM-32U), the others share the same core |
+| ESP32-S3 | ⚠️ **builds clean**, never flashed to a board |
+| ESP32-C3 / C6 / H2 (RISC-V) | ❓ **untried** — this machine has no RISC-V compiler installed (needs `install.sh esp32c3`) |
+| ESP32-S2 | ❓ untried |
+| ESP8266 | ❌ won't work — not supported by ESP-IDF v5, and not enough RAM either |
 
-Tek çekirdekli çeşitler (S2, C3, SOLO-1) için bilinen bir engel yok; kod iki
-çekirdeğe bağımlı değil. Ama yine de denenmedi.
+Nothing known blocks the single-core variants (S2, C3, SOLO-1); the code
+doesn't depend on two cores. Still untried, though.
 
-### Ağ tarafı
+### On the network side
 
-- Bir Tailscale hesabı. Headscale de çalışmalı — `TS2021_TAILSCALE_CONTROL_KEY`
-  ve sunucu adresi değişir — ama **denenmedi**.
-- Kontrol düzlemi için giden **TCP 80**, röle için giden **TCP 443**.
-- UDP 41641 giden — kapalıysa doğrudan yol kurulamaz, her şey röleden gider.
-- Subnet routing için: rotanın admin panelde **onaylanması**, ve bağlanan
-  cihazda **"use subnet routes"** açık olması.
+- A Tailscale account. Headscale should work too — `TS2021_TAILSCALE_CONTROL_KEY`
+  and the server address change — but it's **untried**.
+- Outgoing **TCP 80** for the control plane, outgoing **TCP 443** for the
+  relay.
+- Outgoing UDP 41641 — if it's blocked, no direct path can form and everything
+  goes over the relay.
+- For subnet routing: the route needs **approving** in the admin console, and
+  the connecting device needs **"use subnet routes"** turned on.
 
-### Bilinen sınırlar
+### Known limits
 
-- Hız 1-3 Mbps civarı. Ölçülen AEAD tavanı 1.35 MB/s, üstüne WiFi ve lwIP payı
-  biniyor. SSH, sensör, cihaz arayüzü için yeter; video için yetmez.
-- El sıkışma anlarında ~100 ms gecikme sıçraması: X25519 bu çipte 180 ms
-  sürüyor ve o sırada alıcı görev başka iş yapmıyor.
-- Aynı anda en fazla 8 WireGuard peer'ı, 16 yol keşfi peer'ı (derleme sabiti).
-- IPv6 tailnet adresi atanıyor ama kullanılmıyor; her şey IPv4 üzerinden.
+- End-to-end measured speed is 0.4-0.5 Mbps (with the panel's "Speed test"
+  button, see above) — well under the 1.35 MB/s AEAD ceiling measured on the
+  host; Wi-Fi, lwIP, and `httpd` sending everything in 4 KB chunks each cost
+  more than assumed. Enough for SSH, sensors, a device's own interface; not
+  enough for video.
+- A ~100 ms latency spike during handshakes: X25519 takes 180 ms on this chip,
+  and the receiving task does nothing else while it runs.
+- At most 8 WireGuard peers and 16 path-discovery peers at a time (build-time
+  constants).
+- An IPv6 tailnet address is assigned but never used; everything runs over
+  IPv4.
 
-## NAT gerçeği
+## The reality of NAT
 
-`build/path_test` motoru gerçek ev modemlerinin davranışlarına karşı çalıştırır.
-Sonuç, projenin senin evinde çalışıp çalışmayacağını belirleyen şey:
+The `build/path_test` engine runs against how real home modems actually
+behave. The result is what decides whether this project works at your house:
 
-| Senin modemin | Karşı taraf | Doğrudan yol |
+| Your modem | The other side | Direct path |
 |---|---|---|
-| açık / full cone / restricted cone | aynısı | ✅ kuruluyor |
-| restricted cone | restricted cone | ✅ delik açılıyor |
-| **simetrik** | herhangi | ❌ **kurulamıyor — DERP şart** |
+| open / full cone / restricted cone | the same | ✅ forms |
+| restricted cone | restricted cone | ✅ a hole gets punched |
+| **symmetric** | anything | ❌ **can't form — DERP is required** |
 
-Son satır önemli: simetrik NAT'ta delik açılamaz, bu protokolün değil
-matematiğin sonucu. O durumda trafiğin Tailscale'in relay sunucularından
-geçmesi gerekir, o da TLS demek, o da ~45 KB RAM demek. Modeminin hangi
-sınıfta olduğunu ancak kartta STUN çalıştırınca öğreneceğiz.
+The last line matters: a symmetric NAT can't have a hole punched through it —
+that's a consequence of the math, not the protocol. In that case traffic has
+to go through Tailscale's relay servers, which means TLS, which means ~45 KB
+of RAM. Which class your modem falls into is something we'll only learn once
+STUN runs on the board.
 
-Motorun simetrik senaryoda "yol buldum" dememesi bilerek test ediliyor:
-olmayan bir yolu varmış gibi göstermek, hiç bulamamaktan daha kötüdür.
+The engine deliberately never claims "found a path" in the symmetric case,
+and that's tested on purpose: showing a path that doesn't exist is worse than
+admitting none was found.
 
-## Sunucuları yormama
+## Not hammering anyone else's servers
 
-Bu, başkasının altyapısı. `build/client_test` bir saatlik tam kesinti
-simüle edip kaç kez bağlanmaya çalışıldığını sayıyor: **66.** Geri çekilme
-1 saniyeden başlayıp 60 saniyede tavan yapıyor, üstüne ±%25 jitter var —
-aynı anda elektrik gelen bir sürü cihaz aynı saniyede saldırmasın diye.
-429 gelirse beş dakika susuluyor, ısrar edilmiyor.
+This is someone else's infrastructure. `build/client_test` simulates a full
+hour-long outage and counts how many times it tried to reconnect: **66.**
+Backoff starts at 1 second and caps at 60, with ±25% jitter on top — so a pile
+of devices that get power back at the same second don't all hit the server in
+the same one. A 429 gets five minutes of silence, no arguing with it.
