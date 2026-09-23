@@ -82,7 +82,14 @@ Sonrası sırayla, ve **hepsi evde yapılabilir** — köyü beklemek gerekmiyor
    eder, ama panelde **tekrar onaylanması** gerekir.
 
 Doğrulanmamışlar: saatler/günler süren kararlılık, yük altında davranış.
-Hız beklentisi 1-3 Mbps.
+
+**Hız, ölçüldü.** Panelin Ağ sekmesindeki "Hız testi" düğmesi (`/api/speedtest`)
+tarayıcıdan cihaza 1 MB indirip süresini JS'te ölçüyor. Evden uzaktan, aynı
+1 MB'ı iki kez çekince: röle üzerinden (DERP fra) 63 KB/s (0.50 Mbps, 16.6 sn),
+birkaç saniye sonra kurulan doğrudan yolda 52 KB/s (0.42 Mbps, 20 sn). İkisi de
+daha önce buraya yazılmış "1-3 Mbps beklenti"sinin altında — o sayı hiç
+ölçülmemiş bir tahmindi, bu ikisi tek seferlik gerçek ölçüm. Tekrarlanmadı,
+farklı sinyal gücünde veya farklı bir ev ağında ne çıkacağı bilinmiyor.
 
 ### NAPT yanlış arayüzdeydi
 
@@ -593,8 +600,10 @@ Tek çekirdekli çeşitler (S2, C3, SOLO-1) için bilinen bir engel yok; kod iki
 
 ### Bilinen sınırlar
 
-- Hız 1-3 Mbps civarı. Ölçülen AEAD tavanı 1.35 MB/s, üstüne WiFi ve lwIP payı
-  biniyor. SSH, sensör, cihaz arayüzü için yeter; video için yetmez.
+- Uçtan uca ölçülen hız 0.4-0.5 Mbps (panelin "Hız testi" düğmesiyle, bkz.
+  yukarısı) — AEAD'in host'ta ölçülen 1.35 MB/s tavanının çok altında; WiFi,
+  lwIP ve tek seferde 4 KB'lık parçalar halinde gönderen `httpd`'nin payı
+  sanılandan büyük. SSH, sensör, cihaz arayüzü için yeter; video için yetmez.
 - El sıkışma anlarında ~100 ms gecikme sıçraması: X25519 bu çipte 180 ms
   sürüyor ve o sırada alıcı görev başka iş yapmıyor.
 - Aynı anda en fazla 8 WireGuard peer'ı, 16 yol keşfi peer'ı (derleme sabiti).

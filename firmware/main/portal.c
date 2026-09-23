@@ -91,6 +91,13 @@ static int hexval(char c) {
 // last tab, not corrupt the heap; this is what keeps that true.
 static inline size_t room(size_t cap, size_t o) { return o < cap ? cap - o : 0; }
 
+// The same overflow, on the way out. o is the sum of what snprintf says it
+// WOULD have written, which keeps growing past cap once a page overflows -
+// room() only stops the writes themselves from wrapping. Sending o bytes out
+// of a cap-byte allocation past that point reads whatever heap sits after it,
+// which is a page that discloses stale memory, not just one missing a tab.
+static inline size_t clamp_len(size_t cap, size_t o) { return o < cap ? o : cap; }
+
 // Pulls one field out of an application/x-www-form-urlencoded body.
 static bool form_field(const char *body, const char *name, char *out, size_t cap) {
     size_t nlen = strlen(name);
@@ -170,6 +177,11 @@ static const char CSS[] =
     "--track:#e6eaee;--sigoff:#d3d9df;--hover:#eef1f4;"
     "--blue:#2563eb;--green:#16a34a;--amber:#b45309;--red:#dc2626}"
     "*{box-sizing:border-box}"
+    // Keeps the scrollbar's own width part of the layout at all times, so a
+    // tab shorter than the viewport (no scrollbar) and one taller than it
+    // (scrollbar appears) don't leave .wrap's centering to land in two
+    // different places - the jump a reader saw when switching tabs.
+    "html{overflow-y:scroll}"
     "body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:0 0 40px;"
     "background:var(--bg);color:var(--fg)}"
     ".wrap{max-width:860px;margin:0 auto;padding:18px 14px 0}"
@@ -213,9 +225,17 @@ static const char CSS[] =
        switch used to be whichever item happened to wrap, landing under the
        tabs. Give the tabs their own full-width row instead, so brand and
        switch always keep the first one. */
+    // overflow-x:auto turns this row into its own scrollport, and Genel's
+    // ::before/Ayarlar's ::after both draw 12px to the OUTSIDE of the first
+    // and last tab - past where that scrollport starts and ends. Without
+    // this padding the scrollport clips them: Genel's curved left corner
+    // came out square, which is what the padding buys back.
     "@media(max-width:640px){.luciheader nav{order:3;flex:0 0 100%;"
-    "overflow-x:auto;margin-top:2px}}"
-    ".indicators{display:flex;align-items:center;padding:7px 0}"
+    "overflow-x:auto;margin-top:2px;padding:0 12px}}"
+    // margin-left:auto, not just nav's own flex:1, pushes this to the far
+    // right: on mobile nav drops its flex:1 to wrap onto its own row, which
+    // would otherwise leave the switch sitting right next to the brand.
+    ".indicators{display:flex;align-items:center;padding:7px 0;margin-left:auto}"
     ".theme-switch{position:relative;width:42px;height:23px;display:inline-block;"
     "cursor:pointer;border-radius:999px}"
     ".theme-switch input{position:absolute;opacity:0;width:0;height:0}"
@@ -455,7 +475,7 @@ static esp_err_t get_setup(httpd_req_t *req) {
         "<p class=sub><a href='/setup'>listeyi yenile</a></p></div>", (unsigned)n);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(16384, o));
     free(page);
     return ESP_OK;
 }
@@ -751,11 +771,15 @@ static esp_err_t get_status(httpd_req_t *req) {
     // The panels are rendered in order and the settings one is last, so when
     // this runs out it is the update form that disappears - the one control
     // somebody may be reaching for from a long way away. Hence the headroom -
-    // bumped once already, when a heavier CSS and a real device's own field
-    // lengths (a long SSID, an internet address with a port) pushed a live
-    // page past the old 28672 and past room()'s safe-truncation floor too.
-    char *page = malloc(32768);
-    size_t cap = 32768, o = 0;
+    // bumped twice already: once when a heavier CSS and a real device's own
+    // field lengths (a long SSID, an internet address with a port) pushed a
+    // live page past the old 28672, and again when the speed-test card's
+    // markup and script pushed it past 32768 far enough to cut the script off
+    // mid-function - o (see below) had grown past cap by then, so the send
+    // at the bottom was reading past the allocation's end, not just losing a
+    // tab cleanly the way room() intends.
+    char *page = malloc(40960);
+    size_t cap = 40960, o = 0;
     char ip[16], up[24], esc[520], pub[64], wifi_ssid[36];
     char sig[240], m1[96], m2[96], m3[96];
     // Static, not on the stack: three of these plus the device row list is
@@ -989,7 +1013,16 @@ static esp_err_t get_status(httpd_req_t *req) {
         "<div class=cell><div class=k>Gelen yanıt</div><div class=v>%u</div></div>"
         "<div class=cell><div class=k>Röleden giden</div><div class=v>%u</div></div>"
         "<div class=cell><div class=k>Röleden gelen</div><div class=v>%u</div></div>"
-        "</div></div>",
+        "</div>"
+        "<h2>Hız testi</h2><p class=hint>Bu tarayıcı ile cihaz arasında ölçülen "
+        "gerçek indirme hızı - Wi-Fi, tünel ve şifrelemenin tümü dahil. README'deki "
+        "&quot;1-3 Mbps beklenti&quot; buradan doğrulanır.</p>"
+        "<div class=grid id=spdbox style=display:none>"
+        "<div class=cell><div class=k>Hız</div><div class=v id=spdv>-</div></div>"
+        "<div class=cell><div class=k>Süre</div><div class=v id=spdt>-</div></div>"
+        "</div>"
+        "<button id=spdb onclick='spd()'>Hız testini başlat</button>"
+        "</div>",
         wifi_ssid[0] ? wifi_ssid : "-", sig, rssi, signal_word(bars), channel,
         (unsigned)link_reconnects,
         (copy_cell(c2, sizeof(c2), "Ev ağındaki adresi", ip), c2),
@@ -1197,10 +1230,32 @@ static esp_err_t get_status(httpd_req_t *req) {
         "else{s.textContent='olmadı: '+x.responseText;b.disabled=false;window.OB=0}};"
         "x.onerror=()=>{s.textContent='bağlantı kesildi';b.disabled=false;window.OB=0};"
         "x.send(f)}"
+        // 1 MB is long enough to ride out one slow start and short enough that
+        // a 1 Mbps link still answers in under ten seconds. The clock starts
+        // and stops in the browser, so the number includes everything between
+        // here and the device - not just what the firmware thinks it sent.
+        "function spd(){const b=document.getElementById('spdb'),bx=document.getElementById('spdbox'),"
+        "v=document.getElementById('spdv'),t=document.getElementById('spdt');"
+        "window.OB=1;b.disabled=true;const OT=b.textContent;b.textContent='Ölçülüyor...';"
+        "const t0=performance.now();"
+        "fetch('/api/speedtest?bytes=1048576',{cache:'no-store'}).then(x=>x.arrayBuffer())"
+        ".then(a=>{const dt=(performance.now()-t0)/1000,"
+        "mbps=(a.byteLength*8/1e6)/dt;"
+        "v.textContent=mbps.toFixed(2)+' Mbps';"
+        "t.textContent=dt.toFixed(1)+' sn, '+Math.round(a.byteLength/1024/dt)+' KB/s';"
+        "bx.style.display='block';b.textContent='Tekrar ölç';b.disabled=false;"
+        // The 4s auto-refresh below overwrites .panels wholesale with the
+        // server's freshly-rendered (result-less) markup - without this, the
+        // number this whole button exists to show got wiped within a second
+        // of appearing. Fifteen seconds is long enough to read it once.
+        "setTimeout(()=>{window.OB=0},15000)})"
+        ".catch(()=>{v.textContent='olmadı';t.textContent='bağlantı koptu';"
+        "bx.style.display='block';b.textContent=OT;b.disabled=false;"
+        "setTimeout(()=>{window.OB=0},15000)})}"
         "</script>");
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(cap, o));
     free(page);
     return ESP_OK;
 }
@@ -1241,7 +1296,7 @@ static esp_err_t get_settings(httpd_req_t *req) {
         device_is_registered() ? "kayitli" : "kayitli degil");
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(cap, o));
     free(page);
     return ESP_OK;
 }
@@ -1323,8 +1378,54 @@ static esp_err_t get_api_status(httpd_req_t *req) {
         derp_region, derp_connected_str);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, page, o);
+    httpd_resp_send(req, page, clamp_len(cap, o));
     free(page);
+    return ESP_OK;
+}
+
+// Streams a fixed amount of filler as fast as the link allows, so the "Hız
+// testi" button can time how long it takes to arrive and turn that into a
+// real number. README's "1-3 Mbps beklenti" was never measured against an
+// actual client until this - it is a throughput probe, not a diagnostic, so
+// it has no opinion about the transport (Wi-Fi vs tunnel vs relay): the
+// browser's clock covers whichever path the request actually took.
+//
+// The pattern byte is fixed and the buffer is static, not because either one
+// matters for a speed measurement, but because a fresh 4 KB heap allocation
+// per chunk would be its own variable in the result.
+#define SPEEDTEST_CHUNK 4096
+#define SPEEDTEST_MAX (4 * 1024 * 1024)
+#define SPEEDTEST_DEFAULT (1024 * 1024)
+
+static esp_err_t get_speedtest(httpd_req_t *req) {
+    static uint8_t chunk[SPEEDTEST_CHUNK];
+    static bool filled;
+    char qs[32], val[16];
+    long total = SPEEDTEST_DEFAULT;
+
+    if (!filled) { memset(chunk, 0xa5, sizeof(chunk)); filled = true; }
+
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK &&
+        httpd_query_key_value(qs, "bytes", val, sizeof(val)) == ESP_OK) {
+        long v = atol(val);
+        if (v > 0) total = v;
+    }
+    if (total > SPEEDTEST_MAX) total = SPEEDTEST_MAX;
+    if (total < SPEEDTEST_CHUNK) total = SPEEDTEST_CHUNK;
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    {
+        long sent = 0;
+        while (sent < total) {
+            size_t want = (size_t)((total - sent) < SPEEDTEST_CHUNK ?
+                                    (total - sent) : SPEEDTEST_CHUNK);
+            if (httpd_resp_send_chunk(req, (const char *)chunk, want) != ESP_OK)
+                return ESP_FAIL;
+            sent += (long)want;
+        }
+        httpd_resp_send_chunk(req, NULL, 0);
+    }
     return ESP_OK;
 }
 
@@ -1504,6 +1605,7 @@ esp_err_t portal_start(bool captive) {
         httpd_uri_t settings = { .uri = "/settings", .method = HTTP_GET, .handler = get_settings };
         httpd_uri_t rejoin = { .uri = "/rejoin", .method = HTTP_POST, .handler = post_rejoin };
         httpd_uri_t api = { .uri = "/api/status", .method = HTTP_GET, .handler = get_api_status };
+        httpd_uri_t speedtest = { .uri = "/api/speedtest", .method = HTTP_GET, .handler = get_speedtest };
         // Registered in setup mode too: a device that cannot join any network
         // can still be re-flashed by joining its own, which is one fewer
         // reason to need a cable.
@@ -1519,6 +1621,7 @@ esp_err_t portal_start(bool captive) {
         if (!captive) httpd_register_uri_handler(s_server, &settings);
         if (!captive) httpd_register_uri_handler(s_server, &rejoin);
         if (!captive) httpd_register_uri_handler(s_server, &api);
+        if (!captive) httpd_register_uri_handler(s_server, &speedtest);
         httpd_register_uri_handler(s_server, &ota);
     }
 
