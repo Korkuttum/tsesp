@@ -166,8 +166,11 @@ static bool form_field(const char *body, const char *name, char *out, size_t cap
 // imply an endorsement that does not exist - the same reason NOTICE.md says
 // so in words. A chip outline with a small mesh inside: what this thing is.
 static const char LOGO[] =
-    /* Nine dots in a three-by-three grid, corners faded, at the owner's
-       request. Uses the theme's accent variable so it follows light and dark.
+    /* Nine dots in a three-by-three grid, corners faded, centre picked out,
+       at the owner's request. Uses the theme's accent variable so the ring
+       follows light and dark; the centre uses --fg instead of a fixed white
+       so it still reads as the brightest dot against a white card in light
+       mode, not just against the dark background it was drawn against.
        This is very close to Tailscale's own mark, which is the same grid with
        the top-centre dot also unfilled. That is fine for a private device and
        would not be for anything published or given away; swapping the
@@ -180,7 +183,7 @@ static const char LOGO[] =
     "<circle cx='22' cy='11' r='3.3'/>"
     "<circle cx='33' cy='11' r='3.3' opacity='.28'/>"
     "<circle cx='11' cy='22' r='3.3'/>"
-    "<circle cx='22' cy='22' r='3.3'/>"
+    "<circle cx='22' cy='22' r='3.6' fill='var(--fg)'/>"
     "<circle cx='33' cy='22' r='3.3'/>"
     "<circle cx='11' cy='33' r='3.3' opacity='.28'/>"
     "<circle cx='22' cy='33' r='3.3'/>"
