@@ -166,8 +166,11 @@ static bool form_field(const char *body, const char *name, char *out, size_t cap
 // imply an endorsement that does not exist - the same reason NOTICE.md says
 // so in words. A chip outline with a small mesh inside: what this thing is.
 static const char LOGO[] =
-    /* Nine dots in a three-by-three grid, corners faded, at the owner's
-       request. Uses the theme's accent variable so it follows light and dark.
+    /* Nine dots in a three-by-three grid, corners faded, centre picked out,
+       at the owner's request. Uses the theme's accent variable so the ring
+       follows light and dark; the centre uses --fg instead of a fixed white
+       so it still reads as the brightest dot against a white card in light
+       mode, not just against the dark background it was drawn against.
        This is very close to Tailscale's own mark, which is the same grid with
        the top-centre dot also unfilled. That is fine for a private device and
        would not be for anything published or given away; swapping the
@@ -180,7 +183,7 @@ static const char LOGO[] =
     "<circle cx='22' cy='11' r='3.3'/>"
     "<circle cx='33' cy='11' r='3.3' opacity='.28'/>"
     "<circle cx='11' cy='22' r='3.3'/>"
-    "<circle cx='22' cy='22' r='3.3'/>"
+    "<circle cx='22' cy='22' r='3.6' fill='var(--fg)'/>"
     "<circle cx='33' cy='22' r='3.3'/>"
     "<circle cx='11' cy='33' r='3.3' opacity='.28'/>"
     "<circle cx='22' cy='33' r='3.3'/>"
@@ -189,6 +192,9 @@ static const char LOGO[] =
 
 static const char CSS[] =
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    // iOS looks for this exact path on its own, but Safari only offers the
+    // "Add to Home Screen" icon it names here, not the favicon.
+    "<link rel=apple-touch-icon href=/apple-touch-icon.png>"
     "<style>"
     /* Follows whatever the phone or laptop is set to, unless the header
        switch has set data-theme explicitly - that always wins, since a
@@ -449,6 +455,22 @@ uint32_t portal_idle_ms(void) {
     // - the minutes that matter - that reads as somebody standing here.
     if (!s_last_req_ms) return 0xffffffffu;
     return (uint32_t)(esp_timer_get_time() / 1000) - s_last_req_ms;
+}
+
+// CMakeLists.txt's EMBED_FILES packs this straight into the firmware image;
+// these are the symbols the linker makes out of the file name, not anything
+// declared in a header.
+extern const uint8_t apple_touch_icon_png_start[] asm("_binary_apple_touch_icon_png_start");
+extern const uint8_t apple_touch_icon_png_end[] asm("_binary_apple_touch_icon_png_end");
+
+// What "Add to Home Screen" on an iPhone picks up, via the <link> in CSS
+// above - Safari ignores the favicon for that. 681 bytes, flat PNG, same
+// nine dots as LOGO.
+static esp_err_t get_apple_touch_icon(httpd_req_t *req) {
+    httpd_resp_set_type(req, "image/png");
+    httpd_resp_send(req, (const char *)apple_touch_icon_png_start,
+                     apple_touch_icon_png_end - apple_touch_icon_png_start);
+    return ESP_OK;
 }
 
 // The log, as plain text. Deliberately not on the dashboard: it is for
@@ -1771,6 +1793,8 @@ esp_err_t portal_start(bool captive) {
         // can still be re-flashed by joining its own, which is one fewer
         // reason to need a cable.
         httpd_uri_t ota = { .uri = "/ota", .method = HTTP_POST, .handler = post_ota };
+        httpd_uri_t touchicon = { .uri = "/apple-touch-icon.png", .method = HTTP_GET,
+                                   .handler = get_apple_touch_icon };
         {
             httpd_uri_t lg = { .uri = "/log", .method = HTTP_GET, .handler = get_log };
             httpd_register_uri_handler(s_server, &lg);
@@ -1784,6 +1808,7 @@ esp_err_t portal_start(bool captive) {
         if (!captive) httpd_register_uri_handler(s_server, &rejoin);
         if (!captive) httpd_register_uri_handler(s_server, &speedtest);
         httpd_register_uri_handler(s_server, &ota);
+        httpd_register_uri_handler(s_server, &touchicon);
     }
 
     if (captive) {
