@@ -464,8 +464,11 @@ extern const uint8_t apple_touch_icon_png_start[] asm("_binary_apple_touch_icon_
 extern const uint8_t apple_touch_icon_png_end[] asm("_binary_apple_touch_icon_png_end");
 
 // What "Add to Home Screen" on an iPhone picks up, via the <link> in CSS
-// above - Safari ignores the favicon for that. 681 bytes, flat PNG, same
-// nine dots as LOGO.
+// above - Safari ignores the favicon for that. ~17 KB, same nine-dot layout
+// as LOGO but its own glossy/glow artwork (the owner's reference icon,
+// rendered full-bleed with no rounded corners of its own: iOS applies its
+// own squircle mask and edge highlight, and a second one baked into the
+// PNG would double up against it).
 static esp_err_t get_apple_touch_icon(httpd_req_t *req) {
     httpd_resp_set_type(req, "image/png");
     httpd_resp_send(req, (const char *)apple_touch_icon_png_start,
