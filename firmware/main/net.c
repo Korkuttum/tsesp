@@ -10,6 +10,7 @@
 #include "lwip/inet.h"
 #include "net.h"
 #include "device_nvs.h"
+#include "events.h"
 
 static const char *TAG = "net";
 
@@ -89,7 +90,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             s_down_since_ms = now_ms();
             s_last_try_ms = now_ms();
             s_backoff_ms = RECONNECT_MIN_MS;
-            ESP_LOGW(TAG, "wifi link lost (reason %u)", reason);
+            events_add(EV_WIFI_LOST, reason, e ? e->rssi : 0);
+            ESP_LOGW(TAG, "wifi link lost (reason %u, rssi %d)", reason, e ? e->rssi : 0);
         }
         strcpy(s_ip, "0.0.0.0");
         if (!s_sta_configured) return;
@@ -121,6 +123,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        bool back_after_loss;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         if (e->ip_info.ip.addr != s_last_ip) {
             s_last_ip = e->ip_info.ip.addr;
@@ -129,6 +132,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_join_tries = 0;
         s_auth_fails = 0;
         s_backoff_ms = RECONNECT_MIN_MS;
+        back_after_loss = s_joined_once && !s_connected;
         s_connected = true;
         s_joined_once = true;
         {
@@ -137,7 +141,11 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             // between -46 and -80 dBm, and without this in the log there is
             // no way to tell afterwards which one it settled on.
             wifi_ap_record_t ap;
-            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+            bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+            if (back_after_loss)
+                events_add(EV_WIFI_BACK, (int32_t)((now_ms() - s_down_since_ms) / 1000),
+                           have_ap ? ap.rssi : 0);
+            if (have_ap)
                 ESP_LOGI(TAG, "connected, ip %s via %02x:%02x:%02x:%02x:%02x:%02x "
                               "ch %d, rssi %d", s_ip,
                          ap.bssid[0], ap.bssid[1], ap.bssid[2],

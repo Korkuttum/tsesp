@@ -30,6 +30,7 @@
 #include "derp_task.h"
 #include "tun.h"
 #include "logbuf.h"
+#include "events.h"
 #include "ota.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
@@ -391,6 +392,7 @@ static ts_result do_map(void) {
 
     rc = ts_control_map(s_tc, &req, &s_netmap, &status);
     ESP_LOGW(TAG, "map session ended rc=%d http=%d", rc, status);
+    events_add(EV_MAP_ENDED, rc, status);
     if (status == 401 || status == 403) return TS_ERR_AUTH;
     return rc == 0 ? TS_OK : TS_ERR_TRANSPORT;
 }
@@ -529,6 +531,7 @@ void app_main(void) {
 
     // Before anything that might fail: a log nobody can read is no log.
     logbuf_start();
+    events_init();
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {

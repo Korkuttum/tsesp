@@ -8,10 +8,12 @@
 #include "lwip/sockets.h"
 #include "esp_tls.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "derp.h"
 #include "tls_io.h"
 #include "derp_task.h"
+#include "events.h"
 #include "magic.h"
 
 static const char *TAG = "derp";
@@ -100,6 +102,7 @@ void derp_task_stats(uint32_t *sent, uint32_t *received) {
 
 static void derp_task(void *arg) {
     uint32_t backoff = 2000;
+    int64_t up_since_us = 0;
     (void)arg;
 
     while (!s_have_region) vTaskDelay(pdMS_TO_TICKS(500));
@@ -131,6 +134,8 @@ static void derp_task(void *arg) {
         if (s_connected_region != s_region) s_changed = true;
         s_connected_region = s_region;
         backoff = 2000;
+        up_since_us = esp_timer_get_time();
+        events_add(EV_RELAY_BACK, s_region, 0);
         ESP_LOGI(TAG, "connected to region %u (%s); heap %u", s_region, s_code,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
@@ -174,6 +179,7 @@ static void derp_task(void *arg) {
         }
 
         ESP_LOGW(TAG, "relay connection lost");
+        events_add(EV_RELAY_LOST, (int32_t)((esp_timer_get_time() - up_since_us) / 1000000), 0);
         s_connected_region = 0;
         tls_io_close(s_tls);
 
