@@ -482,14 +482,11 @@ static esp_err_t get_apple_touch_icon(httpd_req_t *req) {
 // device from here and driving to it.
 //
 // The link events go first: the ring below holds minutes, and the events are
-// what is still there hours after a drop. Sent as two chunks so the two
-// buffers never have to exist at the same time.
+// what is still there hours after a drop. Sent in chunks, so one 4 KB buffer
+// serves both halves in turn.
 static esp_err_t get_log(httpd_req_t *req) {
-    static const char ev_head[] = "== link events, oldest first ==
-";
-    static const char log_head[] = "
-== log, last few minutes ==
-";
+    static const char ev_head[] = "== link events, oldest first ==\n";
+    static const char log_head[] = "\n== log, last few minutes ==\n";
     char *buf = malloc(4096);
     size_t n;
     if (!buf) return httpd_resp_send_500(req);
