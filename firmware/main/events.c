@@ -106,7 +106,14 @@ static int format_one(char *out, size_t cap, const ev_entry *e) {
     case EV_RELAY_BACK:
         return snprintf(out, cap, "%srelay connected, region %ld\n", head, (long)e->a);
     case EV_RELAY_LOST:
-        return snprintf(out, cap, "%srelay lost after %lds\n", head, (long)e->a);
+        return snprintf(out, cap, "%srelay lost after %lds, %ld packets delivered\n", head,
+                        (long)e->a, (long)e->b);
+    case EV_RELAY_CHOSEN:
+        if (e->b < 0)
+            return snprintf(out, cap, "%srelay region %ld chosen: it worked last time\n",
+                            head, (long)e->a);
+        return snprintf(out, cap, "%srelay region %ld chosen: %ld peers use it\n", head,
+                        (long)e->a, (long)e->b);
     case EV_MAP_ENDED:
         return snprintf(out, cap, "%scontrol session ended, rc %ld, http %ld\n", head,
                         (long)e->a, (long)e->b);

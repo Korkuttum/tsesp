@@ -36,4 +36,10 @@ esp_err_t device_set_registered(bool yes);
 bool      device_lang_pref(bool *en);
 esp_err_t device_set_lang_en(bool en);
 
+// The relay region that last carried a packet from a peer to this device.
+// Choosing the relay afresh at every boot can land on one that peers cannot
+// reach us through; one that has demonstrably worked is the better bet.
+bool      device_relay_get(uint16_t *region);
+esp_err_t device_relay_set(uint16_t region);
+
 #endif

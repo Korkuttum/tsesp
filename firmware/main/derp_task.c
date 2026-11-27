@@ -14,6 +14,7 @@
 #include "tls_io.h"
 #include "derp_task.h"
 #include "events.h"
+#include "device_nvs.h"
 #include "magic.h"
 
 static const char *TAG = "derp";
@@ -103,7 +104,11 @@ void derp_task_stats(uint32_t *sent, uint32_t *received) {
 static void derp_task(void *arg) {
     uint32_t backoff = 2000;
     int64_t up_since_us = 0;
+    uint32_t delivered = 0;     // packets from peers on this connection
+    uint16_t saved = 0;
     (void)arg;
+
+    (void)device_relay_get(&saved);
 
     while (!s_have_region) vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -135,6 +140,7 @@ static void derp_task(void *arg) {
         s_connected_region = s_region;
         backoff = 2000;
         up_since_us = esp_timer_get_time();
+        delivered = 0;
         events_add(EV_RELAY_BACK, s_region, 0);
         ESP_LOGI(TAG, "connected to region %u (%s); heap %u", s_region, s_code,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
@@ -167,6 +173,17 @@ static void derp_task(void *arg) {
                     // A relayed packet has no UDP source, so nothing here can
                     // be offered to the path engine as an address to probe.
                     magic_handle_relayed(src, pkt, len);
+                    // The first packet a peer gets through this region is
+                    // what makes it the one to come back to after a reboot
+                    // (see the relay choice in main.c). Written once, and
+                    // only when it changes: flash has a finite number of
+                    // erase cycles.
+                    if (++delivered == 1 && saved != s_region &&
+                        device_relay_set(s_region) == ESP_OK) {
+                        saved = s_region;
+                        ESP_LOGI(TAG, "region %u delivered a peer's packet; "
+                                      "remembering it for the next boot", s_region);
+                    }
                 }
             }
 
@@ -179,7 +196,8 @@ static void derp_task(void *arg) {
         }
 
         ESP_LOGW(TAG, "relay connection lost");
-        events_add(EV_RELAY_LOST, (int32_t)((esp_timer_get_time() - up_since_us) / 1000000), 0);
+        events_add(EV_RELAY_LOST, (int32_t)((esp_timer_get_time() - up_since_us) / 1000000),
+                   (int32_t)delivered);
         s_connected_region = 0;
         tls_io_close(s_tls);
 

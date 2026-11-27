@@ -162,9 +162,20 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
     // their own latencies. Following the majority lands on a relay that is
     // near them, and near us, without probing anything - which matters here
     // because this ISP blackholes the UDP that probing would use.
+    //
+    // The majority is not stable, though: it is taken from whichever peers
+    // the first netmap happens to describe, and it has come out as Amsterdam
+    // on one boot and Frankfurt on the next. On the Amsterdam boot a peer
+    // that can only reach this device through a relay (this ISP's NAT gives
+    // it no direct path) never got a packet through, for twenty minutes,
+    // while Frankfurt worked at once - before and after. So a region that
+    // has actually delivered a peer's packet is remembered (see derp_task.c)
+    // and preferred over a fresh count, as long as the netmap still lists it.
     if (info->nderp > 0 && !derp_task_region()) {
         int counts[TS_MAX_DERP_REGIONS];
         int i, j, best = 0, n = peers_count();
+        uint16_t saved = 0;
+        bool remembered = false;
 
         memset(counts, 0, sizeof(counts));
         for (i = 0; i < n; i++) {
@@ -176,10 +187,28 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
         for (j = 1; j < info->nderp; j++)
             if (counts[j] > counts[best]) best = j;
 
+        if (device_relay_get(&saved)) {
+            for (j = 0; j < info->nderp; j++) {
+                if (info->derp[j].region_id == saved && info->derp[j].host[0]) {
+                    best = j;
+                    remembered = true;
+                    break;
+                }
+            }
+        }
+
         if (info->derp[best].host[0]) {
-            ESP_LOGI(TAG, "relay region %u (%s) chosen; %d of %d peers use it",
-                     info->derp[best].region_id, info->derp[best].code,
-                     counts[best], n);
+            if (remembered)
+                ESP_LOGI(TAG, "relay region %u (%s) chosen; it delivered last time "
+                              "(%d of %d peers use it)",
+                         info->derp[best].region_id, info->derp[best].code,
+                         counts[best], n);
+            else
+                ESP_LOGI(TAG, "relay region %u (%s) chosen; %d of %d peers use it",
+                         info->derp[best].region_id, info->derp[best].code,
+                         counts[best], n);
+            events_add(EV_RELAY_CHOSEN, info->derp[best].region_id,
+                       remembered ? -1 : counts[best]);
             derp_task_set_region(info->derp[best].region_id,
                                  info->derp[best].host, info->derp[best].code);
         }

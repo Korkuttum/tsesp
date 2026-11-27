@@ -15,8 +15,9 @@ typedef enum {
     EV_WIFI_LOST,       // a = Wi-Fi reason code, b = RSSI the driver reported with it
     EV_WIFI_BACK,       // a = seconds it was down, b = RSSI of the access point joined
     EV_RELAY_BACK,      // a = DERP region id
-    EV_RELAY_LOST,      // a = seconds the relay connection had lasted
+    EV_RELAY_LOST,      // a = seconds the relay connection had lasted, b = packets it delivered
     EV_MAP_ENDED,       // a = return code, b = HTTP status of the control session
+    EV_RELAY_CHOSEN,    // a = region id, b = peers using it, or -1 when remembered
 } ev_kind;
 
 // Call once, early. Keeps what an earlier boot recorded when RTC memory
