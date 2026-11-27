@@ -8,6 +8,7 @@
 #include "esp_wifi.h"
 #include "lwip/etharp.h"
 #include "logbuf.h"
+#include "events.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -479,15 +480,28 @@ static esp_err_t get_apple_touch_icon(httpd_req_t *req) {
 // The log, as plain text. Deliberately not on the dashboard: it is for
 // whoever is debugging, and it is the difference between diagnosing this
 // device from here and driving to it.
+//
+// The link events go first: the ring below holds minutes, and the events are
+// what is still there hours after a drop. Sent in chunks, so one 4 KB buffer
+// serves both halves in turn.
 static esp_err_t get_log(httpd_req_t *req) {
+    static const char ev_head[] = "== link events, oldest first ==\n";
+    static const char log_head[] = "\n== log, last few minutes ==\n";
     char *buf = malloc(4096);
     size_t n;
     if (!buf) return httpd_resp_send_500(req);
-    n = logbuf_read(buf, 4096);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_send(req, buf, n);
+
+    httpd_resp_send_chunk(req, ev_head, sizeof(ev_head) - 1);
+    n = events_format(buf, 4096);
+    if (n) httpd_resp_send_chunk(req, buf, n);
+
+    httpd_resp_send_chunk(req, log_head, sizeof(log_head) - 1);
+    n = logbuf_read(buf, 4096);
+    if (n) httpd_resp_send_chunk(req, buf, n);
+
     free(buf);
-    return ESP_OK;
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 static esp_err_t get_setup(httpd_req_t *req) {
@@ -1147,8 +1161,10 @@ static esp_err_t get_status(httpd_req_t *req) {
         T("Bağlı olduğu ağ", "Connected to"), wifi_ssid[0] ? wifi_ssid : "-",
         T("Sinyal", "Signal"), sig, rssi, signal_word(bars),
         T("Kanal", "Channel"), channel,
-        T("Kopma sayısı", "Reconnect count"), (unsigned)link_reconnects,
-        T("kez yeniden bağlandı", "reconnects"),
+        // It counts attempts, each twice as far apart as the last, not
+        // drops - one outage can account for several.
+        T("Yeniden bağlanma denemesi", "Reconnect attempts"), (unsigned)link_reconnects,
+        T("deneme, toplam", "attempts, in total"),
         T("Adresler", "Addresses"),
         T("&quot;Paylaşılan ev ağı&quot;, bu cihaz üzerinden uzaktan erişebileceğin yerel ağdır. Tailscale panelinde onaylanması gerekir.",
           "\"Shared home network\" is the LAN you can reach remotely through this device. It needs approving in the Tailscale admin console."),
@@ -1356,7 +1372,7 @@ static esp_err_t get_status(httpd_req_t *req) {
                   "onaylayamadı, önyükleyici bu sürüme geri döndü.</p>",
                   "<p class=hint><b>Note:</b> the most recently uploaded firmware could "
                   "not confirm itself, and the bootloader fell back to this version.</p>") : "",
-            T(".bin dosyasi sec", "choose a .bin file"),
+            T(".bin dosyası seç", "choose a .bin file"),
             T("Yükle ve yeniden başlat", "Upload and restart"));
     }
     o += snprintf(page + o, room(cap, o),
@@ -1396,6 +1412,18 @@ static esp_err_t get_status(httpd_req_t *req) {
         "window.OB=1;const f=e.target.files[0],l=document.getElementById('fwl');"
         "if(f&&l){l.textContent=f.name+' - '+Math.round(f.size/1024)+' KB';"
         "l.classList.add('has')}});"
+        // Parking the refresh only once `change` fired was too late: the file
+        // dialog stays open for as long as it takes to find the file, and a
+        // repaint in that time swaps in a new <input>. The choice then lands
+        // on the detached old one - its `change` never reaches document - so
+        // the label kept saying no file was picked. Park it as the dialog
+        // opens instead, and let the refresh resume if the dialog is
+        // cancelled with nothing chosen. `cancel` does not bubble, hence the
+        // capture phase for both.
+        "document.addEventListener('click',e=>{if(e.target.closest&&"
+        "e.target.closest('#fwl,#fw'))window.OB=1},true);"
+        "document.addEventListener('cancel',e=>{if(e.target.id=='fw'&&"
+        "!e.target.files.length)window.OB=0},true);"
         // Checking OB only here left a gap the width of the fetch itself: pick
         // a file while a refresh already in flight, and it lands anyway once
         // the awaits resolve, rebuilding <input type=file> from scratch and

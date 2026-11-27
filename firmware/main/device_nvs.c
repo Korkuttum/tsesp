@@ -136,3 +136,14 @@ esp_err_t device_set_lang_en(bool en) {
     uint8_t v = en ? 1 : 0;
     return blob_set("lang", &v, sizeof(v));
 }
+
+bool device_relay_get(uint16_t *region) {
+    uint16_t v = 0;
+    if (blob_get("relay", &v, sizeof(v)) != ESP_OK || !v) return false;
+    *region = v;
+    return true;
+}
+
+esp_err_t device_relay_set(uint16_t region) {
+    return blob_set("relay", &region, sizeof(region));
+}

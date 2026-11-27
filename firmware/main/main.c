@@ -30,6 +30,7 @@
 #include "derp_task.h"
 #include "tun.h"
 #include "logbuf.h"
+#include "events.h"
 #include "ota.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
@@ -161,9 +162,20 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
     // their own latencies. Following the majority lands on a relay that is
     // near them, and near us, without probing anything - which matters here
     // because this ISP blackholes the UDP that probing would use.
+    //
+    // The majority is not stable, though: it is taken from whichever peers
+    // the first netmap happens to describe, and it has come out as Amsterdam
+    // on one boot and Frankfurt on the next. On the Amsterdam boot a peer
+    // that can only reach this device through a relay (this ISP's NAT gives
+    // it no direct path) never got a packet through, for twenty minutes,
+    // while Frankfurt worked at once - before and after. So a region that
+    // has actually delivered a peer's packet is remembered (see derp_task.c)
+    // and preferred over a fresh count, as long as the netmap still lists it.
     if (info->nderp > 0 && !derp_task_region()) {
         int counts[TS_MAX_DERP_REGIONS];
         int i, j, best = 0, n = peers_count();
+        uint16_t saved = 0;
+        bool remembered = false;
 
         memset(counts, 0, sizeof(counts));
         for (i = 0; i < n; i++) {
@@ -175,10 +187,28 @@ static int on_netmap_message(void *ctx, const ts_netmap_info *info) {
         for (j = 1; j < info->nderp; j++)
             if (counts[j] > counts[best]) best = j;
 
+        if (device_relay_get(&saved)) {
+            for (j = 0; j < info->nderp; j++) {
+                if (info->derp[j].region_id == saved && info->derp[j].host[0]) {
+                    best = j;
+                    remembered = true;
+                    break;
+                }
+            }
+        }
+
         if (info->derp[best].host[0]) {
-            ESP_LOGI(TAG, "relay region %u (%s) chosen; %d of %d peers use it",
-                     info->derp[best].region_id, info->derp[best].code,
-                     counts[best], n);
+            if (remembered)
+                ESP_LOGI(TAG, "relay region %u (%s) chosen; it delivered last time "
+                              "(%d of %d peers use it)",
+                         info->derp[best].region_id, info->derp[best].code,
+                         counts[best], n);
+            else
+                ESP_LOGI(TAG, "relay region %u (%s) chosen; %d of %d peers use it",
+                         info->derp[best].region_id, info->derp[best].code,
+                         counts[best], n);
+            events_add(EV_RELAY_CHOSEN, info->derp[best].region_id,
+                       remembered ? -1 : counts[best]);
             derp_task_set_region(info->derp[best].region_id,
                                  info->derp[best].host, info->derp[best].code);
         }
@@ -391,6 +421,7 @@ static ts_result do_map(void) {
 
     rc = ts_control_map(s_tc, &req, &s_netmap, &status);
     ESP_LOGW(TAG, "map session ended rc=%d http=%d", rc, status);
+    events_add(EV_MAP_ENDED, rc, status);
     if (status == 401 || status == 403) return TS_ERR_AUTH;
     return rc == 0 ? TS_OK : TS_ERR_TRANSPORT;
 }
@@ -529,6 +560,7 @@ void app_main(void) {
 
     // Before anything that might fail: a log nobody can read is no log.
     logbuf_start();
+    events_init();
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {

@@ -427,6 +427,14 @@ void tun_input(const uint8_t *ip_packet, size_t len) {
         memcpy(&dstip, ip_packet + 16, 4);
         if (len >= 20 && dstip != s_our_ip && s_sta_ip) {
             uint8_t *q = (uint8_t *)p->payload;
+            // WireGuard pads its plaintext to a multiple of 16 bytes, so
+            // `len` runs past the IP packet by up to 15 zero bytes. The
+            // checksum check folds the length into the TCP/UDP pseudo-header,
+            // so judged over `len` most packets looked corrupt when they were
+            // not - two thirds of them, on the panel. lwIP trims to the IP
+            // total length itself; this only has to do the same.
+            size_t ip_len = ((size_t)q[2] << 8) | q[3];
+            if (ip_len >= 20 && ip_len < len) len = ip_len;
             // What the phone sent, before we touch it. If this is already
             // wrong the packet was damaged upstream and no rewrite can save
             // it; if only the second check fails, the rewrite is the fault.
